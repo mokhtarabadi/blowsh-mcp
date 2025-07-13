@@ -90,11 +90,24 @@ AI receives:
 - [Browsh CLI](https://www.brow.sh/downloads/) installed and in PATH  
 
 ```sh
-git clone https://github.com/yourusername/blowsh-mcp.git
+git clone https://github.com/mokhtarabadi/blowsh-mcp.git
 cd blowsh-mcp
 npm install
 npm run build
 ```
+
+---
+
+### Run the MCP server
+
+After building, start the server using:
+
+```sh
+node dist/server.js
+```
+
+Replace `dist/server.js` with the correct path if your build output differs.
+
 
 Create a `.env` file as needed for configuration. For example:
 
@@ -135,13 +148,21 @@ Every tool returns actionable errors: e.g., invalid protocol, 404s, rendering fa
 
 ## MCP Protocol: AI Client Configuration
 
+> **Before configuring your AI client (Claude, Cursor, etc.), you must**
+> 1. Install dependencies:
+> &nbsp;&nbsp;&nbsp;`npm install`
+> 2. Build the project:
+> &nbsp;&nbsp;&nbsp;`npm run build`
+> 3. Launch the MCP server from the compiled output:
+> &nbsp;&nbsp;&nbsp;`node dist/server.js`
+
 **Example config for Claude Desktop or Cursor:**
 ```json
 {
   "mcpServers": {
     "blowsh": {
-      "command": "npx",
-      "args": ["-y", "/abs/path/to/blowsh-mcp"],
+      "command": "node",
+      "args": ["dist/server.js"],
       "env": {}
     }
   }
