@@ -73,18 +73,28 @@ AI receives:
 - `src/server.ts` — MCP server exposing tools.
 - `src/browshManager.ts` — Launch, monitor, shutdown Browsh.
 - `src/tools/fetchWeb.ts` — fetchWeb tool implementation (handles plain, html, markdown).
+- `src/tools/html2markdownManager.ts` — Wrapper for html2markdown CLI.
 - `README.md` — This file.
-- `Dockerfile` — For container launch.
-- `.env` — Config overrides. Set `BROWSH_FIREFOX_PATH` if you need to specify a custom Firefox binary for Browsh (`firefox` by default). Browsh server port/host cannot be set; it is fixed.
+- `Dockerfile` — For container launch (installs html2markdown CLI automatically).
+- `.env` — Config overrides. Set `BROWSH_FIREFOX_PATH` or `HTML2MARKDOWN_PATH` as needed.
 
 ---
 
 ## Installation
 
 **Requirements:**  
+
 - Node.js >= 18  
 - Firefox installed and in PATH  
 - [Browsh CLI](https://www.brow.sh/downloads/) installed and in PATH  
+- [html2markdown CLI](https://github.com/JohannesKaufmann/html-to-markdown) installed and in PATH  
+  - On Debian/Ubuntu, install with:
+    ```sh
+    wget -O /tmp/html2markdown.deb "https://github.com/JohannesKaufmann/html-to-markdown/releases/download/v2.3.3/html2markdown_2.3.3_linux_amd64.deb"
+    sudo apt-get install -y /tmp/html2markdown.deb
+    rm /tmp/html2markdown.deb
+    ```
+  - Or use the prebuilt binary for your OS from the [releases page](https://github.com/JohannesKaufmann/html-to-markdown/releases).
 
 ```sh
 git clone https://github.com/mokhtarabadi/blowsh-mcp.git
@@ -111,9 +121,11 @@ Create a `.env` file as needed for configuration. For example:
 ```env
 MCP_TRANSPORT=stdio
 BROWSH_FIREFOX_PATH=/usr/bin/firefox
+HTML2MARKDOWN_PATH=html2markdown
 NODE_ENV=production
 ```
 - `BROWSH_FIREFOX_PATH` lets you customize the Firefox executable used by Browsh during headless/HTTP operation.
+- `HTML2MARKDOWN_PATH` lets you specify a custom path to the html2markdown binary (default: `html2markdown` in PATH).
 - Browsh's HTTP port/host are NOT configurable.
 
 ---

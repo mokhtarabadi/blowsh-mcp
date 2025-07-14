@@ -29,8 +29,9 @@ export async function fetchWeb({ url, type }: { url: string, type: 'plain' | 'ht
           mainHtml = body.html() || "";
         }
       } catch {}
-      const turndownService = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced', hr: '---' });
-      return turndownService.turndown(mainHtml);
+      // Use html2markdownManager for conversion
+      const { html2markdownConvert } = await import('./html2markdownManager.js');
+      return await html2markdownConvert(mainHtml, { domain: url });
     } else {
       return 'Error: Unknown type. Use one of: plain, html, markdown.';
     }
