@@ -1,7 +1,5 @@
 import dotenv from "dotenv";
-import { fetch_plain } from "./tools/fetchPlain.js";
-import { fetch_html } from "./tools/fetchHtml.js";
-import { fetch_markdown } from "./tools/fetchMarkdown.js";
+import { fetchWeb } from "./tools/fetchWeb.js";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -13,50 +11,18 @@ const server = new McpServer({
   version: "1.0.0"
 });
 
-// Register the fetch_plain tool
 server.registerTool(
-  "fetch_plain",
+  "fetch_web",
   {
-    title: "Fetch Plain (AI-optimized web plain text)",
-    description: "Render any dynamic web page in a JS-capable browser and extract main readable terminal text for summarization and search.",
+    title: "Fetch Web (plain, html, markdown)",
+    description: "Fetch a web page and return its content as plain text, HTML, or Markdown. Uses a JS-capable browser for dynamic sites.",
     inputSchema: {
-      url: z.string().describe("The HTTP/HTTPS web URL to fetch")
+      url: z.string().describe("The HTTP/HTTPS web URL to fetch"),
+      type: z.enum(["plain", "html", "markdown"]).describe("The output type: plain, html, or markdown")
     }
   },
-  async ({ url }: { url: string }) => {
-    const result = await fetch_plain({ url });
-    return { content: [{ type: "text", text: result }] };
-  }
-);
-
-// Register the fetch_html tool
-server.registerTool(
-  "fetch_html",
-  {
-    title: "Fetch HTML (post-JS/DOM)",
-    description: "Get the full, rendered HTML (DOM) of a web page, after all JavaScript, for parsing, scraping, or markup analysis.",
-    inputSchema: {
-      url: z.string().describe("The HTTP/HTTPS web URL to fetch")
-    }
-  },
-  async ({ url }: { url: string }) => {
-    const result = await fetch_html({ url });
-    return { content: [{ type: "text", text: result }] };
-  }
-);
-
-// Register the fetch_markdown tool
-server.registerTool(
-  "fetch_markdown",
-  {
-    title: "Fetch Markdown",
-    description: "Get Markdown generated from a full JS-rendered DOM. Ideal for LLM context ingestion, semantic search, and AI markdown workflows.",
-    inputSchema: {
-      url: z.string().describe("The HTTP/HTTPS web URL to fetch")
-    }
-  },
-  async ({ url }: { url: string }) => {
-    const result = await fetch_markdown({ url });
+  async ({ url, type }: { url: string, type: 'plain' | 'html' | 'markdown' }) => {
+    const result = await fetchWeb({ url, type });
     return { content: [{ type: "text", text: result }] };
   }
 );
