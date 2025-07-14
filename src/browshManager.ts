@@ -1,14 +1,15 @@
-import { spawn, ChildProcess } from 'child_process';
-import axios from 'axios';
+import { spawn, ChildProcess } from "child_process";
+import axios from "axios";
 
 class BrowshManager {
   private process: ChildProcess | null = null;
   private readonly firefoxPath: string;
-  private readonly healthPath: string = '/';
+  private readonly healthPath: string = "/";
 
   constructor(firefoxPath?: string) {
     // Get path from env or default to "firefox"
-    this.firefoxPath = firefoxPath || process.env.BROWSH_FIREFOX_PATH || "firefox";
+    this.firefoxPath =
+      firefoxPath || process.env.BROWSH_FIREFOX_PATH || "firefox";
   }
 
   /** Start Browsh if not running. */
@@ -45,30 +46,32 @@ class BrowshManager {
   }
 
   /** Make a request using the running Browsh instance in the specified mode. */
-  private async fetchRaw(url: string, mode: 'PLAIN' | 'DOM'): Promise<string> {
-    if (!this.isRunning) throw new Error('Browsh not running');
+  private async fetchRaw(url: string, mode: "PLAIN" | "DOM"): Promise<string> {
+    if (!this.isRunning) throw new Error("Browsh not running");
     // Always use default Browsh endpoint; port/host are not configurable
     const browshUrl = `http://127.0.0.1:4333/${url}`;
-    return axios.get(browshUrl, {
-      headers: { 'X-Browsh-Raw-Mode': mode },
-      timeout: 20000
-    }).then(res => res.data as string);
+    return axios
+      .get(browshUrl, {
+        headers: { "X-Browsh-Raw-Mode": mode },
+        timeout: 20000,
+      })
+      .then((res) => res.data as string);
   }
 
   /** Fetches JS-rendered plain text. */
   async fetchPlain(url: string): Promise<string> {
-    return this.fetchRaw(url, 'PLAIN');
+    return this.fetchRaw(url, "PLAIN");
   }
 
   /** Fetches JS-rendered HTML (DOM). */
   async fetchDom(url: string): Promise<string> {
-    return this.fetchRaw(url, 'DOM');
+    return this.fetchRaw(url, "DOM");
   }
 
   /** Cleanly shutdown process (called once at server exit). */
   async shutdown(): Promise<void> {
     if (this.process) {
-      this.process.kill('SIGTERM');
+      this.process.kill("SIGTERM");
       this.process = null;
     }
   }
