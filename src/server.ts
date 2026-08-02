@@ -1,99 +1,175 @@
 import dotenv from "dotenv";
-import { fetchWeb } from "./tools/fetchWeb.js";
 import { z } from "zod";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { browshManager } from "./browshManager.js";
+import { toFetchErrorMessage } from "./errors.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   ToolSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { fetchWeb } from "./tools/fetchWeb.js";
+import { searchWeb } from "./tools/searchWeb.js";
+import { extractLinks } from "./tools/extractLinks.js";
+import { fetchWebBatch } from "./tools/fetchWebBatch.js";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
-// Define the tool schema using the pattern from the sample code.
-// This provides a structured and validated way to declare your tool's capabilities.
-const FetchWebTool = ToolSchema.parse({
-  name: "fetch_web",
-  title: "Fetch Web (plain, html, markdown)",
-  description:
-    "Fetch a web page and return its content as plain text, HTML, or Markdown. Uses a JS-capable browser for dynamic sites.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      url: {
-        type: "string",
-        description: "The HTTP/HTTPS web URL to fetch",
+const tools = [
+  ToolSchema.parse({
+    name: "fetch_web",
+    title: "Fetch Web (plain, html, markdown)",
+    description:
+      "Fetch a web page and return its content as plain text, HTML, or Markdown after full JS rendering. " +
+      "Use `type` to select the output shape; `selector` (CSS) to extract only the matched element; " +
+      "`max_chars` to cap output length; `wait_ms` to keep polling until the page's JavaScript has settled.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The HTTP/HTTPS web URL to fetch" },
+        type: { type: "string", enum: ["plain", "html", "markdown"], description: "Output type: plain, html, or markdown" },
+        selector: { type: "string", description: "Optional CSS selector; only the matched element is returned" },
+        max_chars: { type: "number", description: "Optional cap on output length in characters" },
+        wait_ms: { type: "number", description: "Optional JS settle polling budget in ms (default 0 = single render)" },
       },
-      type: {
-        type: "string",
-        enum: ["plain", "html", "markdown"],
-        description: "The output type: plain, html, or markdown",
-      },
+      required: ["url", "type"],
     },
-    required: ["url", "type"],
-  },
-});
+  }),
+  ToolSchema.parse({
+    name: "search_web",
+    title: "Search the web",
+    description:
+      "Search the web through a rendered search engine and return ranked results (title, url, snippet). " +
+      "Use to discover pages, then feed URLs to fetch_web/extract_links.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        max_results: { type: "number", description: "Max results to return (1-30, default 10)" },
+      },
+      required: ["query"],
+    },
+  }),
+  ToolSchema.parse({
+    name: "extract_links",
+    title: "Extract links from a page",
+    description:
+      "Return the hyperlinks (text + absolute URL) found on the JS-rendered page. " +
+      "Useful for following navigation without fetching the full DOM.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The HTTP/HTTPS web URL" },
+        limit: { type: "number", description: "Max links to return (1-200, default 50)" },
+      },
+      required: ["url"],
+    },
+  }),
+  ToolSchema.parse({
+    name: "fetch_web_batch",
+    title: "Fetch multiple web pages",
+    description:
+      "Fetch up to 10 URLs in one call, reusing the render cache. Returns per-URL results; a failing " +
+      "URL does not fail the whole batch.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        urls: { type: "array", items: { type: "string" }, description: "1-10 HTTP/HTTPS URLs" },
+        type: { type: "string", enum: ["plain", "html", "markdown"], description: "Output type" },
+        selector: { type: "string", description: "Optional CSS selector applied to each page" },
+        max_chars: { type: "number", description: "Optional per-page cap on output length" },
+        wait_ms: { type: "number", description: "Optional JS settle polling budget (ms)" },
+      },
+      required: ["urls", "type"],
+    },
+  }),
+] as const;
+
+type ToolName = (typeof tools)[number]["name"];
+
+const selectors = {
+  fetch_web: z.object({
+    url: z.string(),
+    type: z.enum(["plain", "html", "markdown"]),
+    selector: z.string().optional(),
+    max_chars: z.number().int().min(100).max(2_000_000).optional(),
+    wait_ms: z.number().int().min(0).max(60_000).optional(),
+  }),
+  search_web: z.object({
+    query: z.string().min(1),
+    max_results: z.number().int().min(1).max(30).optional(),
+  }),
+  extract_links: z.object({
+    url: z.string(),
+    limit: z.number().int().min(1).max(200).optional(),
+  }),
+  fetch_web_batch: z.object({
+    urls: z.array(z.string()).min(1).max(10),
+    type: z.enum(["plain", "html", "markdown"]),
+    selector: z.string().optional(),
+    max_chars: z.number().int().min(100).max(2_000_000).optional(),
+    wait_ms: z.number().int().min(0).max(60_000).optional(),
+  }),
+} satisfies Record<ToolName, z.ZodType>;
+
+function textResponse(text: string) {
+  return { content: [{ type: "text" as const, text }], isError: false };
+}
+
+function errorResponse(error: unknown) {
+  return { content: [{ type: "text" as const, text: toFetchErrorMessage(error) }], isError: true };
+}
+
+async function route(name: ToolName, args: unknown): Promise<string> {
+  switch (name) {
+    case "fetch_web": {
+      const { url, type, selector, max_chars, wait_ms } = selectors.fetch_web.parse(args);
+      return fetchWeb({ url, type, selector, max_chars, wait_ms });
+    }
+    case "search_web": {
+      const { query, max_results } = selectors.search_web.parse(args);
+      return JSON.stringify(await searchWeb(query, max_results), null, 2);
+    }
+    case "extract_links": {
+      const { url, limit } = selectors.extract_links.parse(args);
+      return JSON.stringify(await extractLinks(url, limit), null, 2);
+    }
+    case "fetch_web_batch": {
+      const { urls, type, selector, max_chars, wait_ms } = selectors.fetch_web_batch.parse(args);
+      return JSON.stringify(await fetchWebBatch({ urls, type, selector, max_chars, wait_ms }), null, 2);
+    }
+    default:
+      throw new Error(`Unhandled tool: ${name}`);
+  }
+}
 
 async function runServer() {
   const server = new Server(
     {
       name: "blowsh-mcp",
-      version: "1.0.0",
+      version: "2.0.0",
     },
     {
-      capabilities: {
-        tools: {},
-      },
+      capabilities: { tools: {} },
     }
   );
 
-  // Set up a request handler for listing available tools.
-  // This is a standard part of the MCP that allows clients to discover what tools the server offers.
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools: [FetchWebTool],
-    };
+    return { tools: tools.slice() };
   });
 
-  // Set up a request handler for calling tools.
-  // This is where the logic for executing your tool will reside.
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-
-    if (name === FetchWebTool.name) {
-      // It's good practice to validate the incoming arguments against a schema.
-      const inputSchema = z.object({
-        url: z.string(),
-        type: z.enum(["plain", "html", "markdown"]),
-      });
-
-      try {
-        const { url, type } = inputSchema.parse(args);
-        const result = await fetchWeb({ url, type });
-        return { content: [{ type: "text", text: result }] };
-      } catch (error) {
-        // Handle potential validation or execution errors gracefully.
-        const errorMessage =
-          error instanceof Error ? error.message : "An unknown error occurred.";
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Error executing fetch_web: ${errorMessage}`,
-            },
-          ],
-          isError: true,
-        };
-      }
+    const name = request.params.name;
+    const toolName = name as ToolName;
+    if (!(toolName in selectors)) {
+      return errorResponse(new Error(`Tool '${name}' not found.`));
     }
-
-    // If the requested tool is not found, return an error.
-    return {
-      content: [{ type: "text", text: `Tool '${name}' not found.` }],
-      isError: true,
-    };
+    try {
+      return textResponse(await route(toolName, request.params.arguments));
+    } catch (error) {
+      return errorResponse(error);
+    }
   });
 
   const transport = new StdioServerTransport();
@@ -103,9 +179,7 @@ async function runServer() {
   const shutdown = async (signal?: string | Error) => {
     try {
       await browshManager.shutdown();
-      if (signal) {
-        console.error(`Gracefully shutting down (reason: ${signal})`);
-      }
+      if (signal) console.error(`Gracefully shutting down (reason: ${signal})`);
     } catch (e) {
       console.error("Shutdown error:", e);
     }
@@ -113,20 +187,12 @@ async function runServer() {
 
   process.on("SIGINT", () => shutdown("SIGINT").then(() => process.exit(0)));
   process.on("SIGTERM", () => shutdown("SIGTERM").then(() => process.exit(0)));
-  process.on("exit", () => {
-    shutdown("process exit");
-  });
+  process.on("exit", () => void shutdown("process exit"));
   process.on("uncaughtException", (err) => {
-    shutdown(err).then(() => {
-      process.exit(1);
-    });
+    void shutdown(err).then(() => process.exit(1));
   });
   process.on("unhandledRejection", (reason) => {
-    shutdown(reason instanceof Error ? reason : new Error(String(reason))).then(
-      () => {
-        process.exit(1);
-      }
-    );
+    void shutdown(reason instanceof Error ? reason : new Error(String(reason))).then(() => process.exit(1));
   });
 }
 

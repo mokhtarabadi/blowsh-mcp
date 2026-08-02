@@ -1,15 +1,18 @@
 import { spawn, ChildProcess } from "child_process";
 import axios from "axios";
+import { FetchError } from "./errors.js";
 
 class BrowshManager {
   private process: ChildProcess | null = null;
   private readonly firefoxPath: string;
   private readonly healthPath: string = "/";
+  private readonly requestTimeoutMs: number;
 
   constructor(firefoxPath?: string) {
     // Get path from env or default to "firefox"
     this.firefoxPath =
       firefoxPath || process.env.BROWSH_FIREFOX_PATH || "firefox";
+    this.requestTimeoutMs = Number(process.env.BROWSH_REQUEST_TIMEOUT_MS) || 30_000;
   }
 
   /** Start Browsh if not running. */
@@ -47,15 +50,29 @@ class BrowshManager {
 
   /** Make a request using the running Browsh instance in the specified mode. */
   private async fetchRaw(url: string, mode: "PLAIN" | "DOM"): Promise<string> {
-    if (!this.isRunning) throw new Error("Browsh not running");
+    if (!this.isRunning) throw new FetchError("Browsh not running", { url });
     // Always use default Browsh endpoint; port/host are not configurable
     const browshUrl = `http://127.0.0.1:4333/${url}`;
-    return axios
-      .get(browshUrl, {
+    try {
+      const res = await axios.get(browshUrl, {
         headers: { "X-Browsh-Raw-Mode": mode },
-        timeout: 20000,
-      })
-      .then((res) => res.data as string);
+        timeout: this.requestTimeoutMs,
+      });
+      return res.data as string;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        const body = typeof error.response?.data === "string" ? error.response.data : "";
+        if (status) {
+          throw new FetchError(
+            body && !body.includes("<html") ? body.trim().slice(0, 300) : `Request failed with status ${status}`,
+            { statusCode: status, url }
+          );
+        }
+        throw new FetchError(`Request failed: ${error.message}`, { url });
+      }
+      throw error;
+    }
   }
 
   /** Fetches JS-rendered plain text. */
