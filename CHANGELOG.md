@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.1] - 2026-08-03
+
+### Fixed
+- `search_web` latency: DuckDuckGo and Bing are now rendered concurrently; the first engine to return results aborts the other (worst case bounded by the slowest single engine instead of the sum). The DDG Instant Answer probe runs in parallel too.
+- `search_web` timeouts (`-32001`): enrichment is now sequential with a 45 s wall-clock budget, and searches can no longer exceed the engines' combined render time — total worst case ~50 s, safely inside the recommended 120 s client timeout.
+- `browshManager` `ECONNREFUSED 127.0.0.1:4333`: one-shot respawn-and-retry now also engages when the renderer port is gone (browser crashed externally, not just after a recycle), via `ECONNREFUSED`/`ECONNRESET`/`EHOSTUNREACH`/`ENETUNREACH` detection; cancellation (engine race abort) passes through untouched.
+- `search_web` results now carry `fetched_at` (UTC epoch ms) so stale search results are detectable by consumers.
+
+### Changed
+- Bumped version to 2.1.1.
+- opencode MCP client config: blowsh server timeout and `experimental.mcp_timeout` raised from 30 s to 120 s (global + project configs).
+
 ## [2.1.0] - 2026-08-03
 
 ### Added

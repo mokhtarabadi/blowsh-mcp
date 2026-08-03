@@ -9,7 +9,12 @@ export interface SearchResult {
   title: string;
   url: string;
   snippet: string;
+  /** UTC epoch milliseconds when this result set was fetched (staleness signal). */
+  fetched_at: number;
 }
+
+/** Total wall-clock budget for the enrichment phase (ms). */
+const ENRICH_BUDGET_MS = 45_000;
 
 function decodeDdgRedirect(href?: string): string | undefined {
   if (!href || !href.includes("duckduckgo.com/l/")) return href;
@@ -53,7 +58,7 @@ function parseDuckDuckGo(html: string, baseUrl: string): SearchResult[] {
     const href = decodeDdgRedirect(link.attr("href"));
     const abs = absolute(href, baseUrl);
     if (!abs) return;
-    results.push({ title: link.text().trim() || abs, url: abs, snippet });
+    results.push({ title: link.text().trim() || abs, url: abs, snippet, fetched_at: 0 });
   });
   return results;
 }
@@ -67,7 +72,7 @@ function parseBing(html: string, baseUrl: string): SearchResult[] {
     const snippet = $(el).find(".b_caption p, p").first().text().trim();
     const abs = absolute(a.attr("href"), baseUrl);
     if (!abs) return;
-    results.push({ title: a.text().trim() || abs, url: abs, snippet });
+    results.push({ title: a.text().trim() || abs, url: abs, snippet, fetched_at: 0 });
   });
   return results;
 }
@@ -76,13 +81,11 @@ function parseBing(html: string, baseUrl: string): SearchResult[] {
  * Fetches the DuckDuckGo Instant Answer ("zero-click") abstract for a query.
  *
  * Fast path: DDG's public JSON API (api.duckduckgo.com) returns a polished
- * abstract for many factual queries (definitions, capital cities, etc.) with a
- * single cheap request — no browser render needed. The result is a synthetic
- * search result with an empty URL, prepended by `searchWeb` when available.
+ * abstract for many factual queries with a single cheap request — no browser
+ * render needed. The result is a synthetic search result with an empty URL.
  *
- * Graceful degradation: ANY failure (network, timeout, no abstract, malformed
- * response) returns `null` — the caller simply falls back to organic results.
- * This path is best-effort by design and must never throw.
+ * Graceful degradation: ANY failure returns `null` — the caller simply falls
+ * back to organic results. This path is best-effort and must never throw.
  */
 async function fetchInstantAnswer(query: string): Promise<string | null> {
   try {
@@ -102,20 +105,47 @@ async function fetchInstantAnswer(query: string): Promise<string | null> {
 }
 
 /**
- * Searches the web through a rendered search engine and returns ranked results
- * (title, url, snippet). DuckDuckGo HTML is tried first, with a Bing fallback.
+ * Renders one search engine page and parses its organic results. Bounded by
+ * the shared browser mutex; cancellable via `signal` so the sibling engine
+ * fetch can be aborted once the first engine returns results. An aborted
+ * sibling resolves to `[]` (not an error); real failures rethrow.
+ */
+async function renderEngine(
+  engine: { url: string; parse: (html: string) => SearchResult[] },
+  signal?: AbortSignal
+): Promise<SearchResult[]> {
+  await assertSafeUrl(engine.url);
+  try {
+    await browshManager.ensureStarted();
+    const dom = await browshManager.fetchDom(engine.url, signal);
+    return engine.parse(dom);
+  } catch (e) {
+    // An aborted sibling is not an error — the other engine already won.
+    if (axios.isCancel(e) || (axios.isAxiosError(e) && e.code === "ERR_CANCELED")) {
+      return [];
+    }
+    throw e;
+  }
+}
+
+/**
+ * Searches the web through rendered search engines and returns ranked results.
+ * DuckDuckGo HTML and Bing are rendered CONCURRENTLY (single shared browser,
+ * mutex-serialized); the first engine to return results aborts the other, so
+ * worst-case latency is bounded by the slowest single engine, not their sum.
+ * DDG's Instant Answer API is probed in parallel and its abstract is prepended
+ * as a synthetic result when available.
  *
  * @param query The search query.
- * @param maxResults Max organic results to return (1-30).
- * @param page Result page (1-10). Each engine's offset is synthesized from the
- *   page number (DDG: 20/page, Bing: 10/page).
+ * @param maxResults Max results to return (1-30), including the synthetic IA.
+ * @param page Result page (1-10). Engine offsets are synthesized per engine.
  * @param enrich When true, the top 3 organic results' snippets are replaced
- *   with fetched main-content markdown (≤1500 chars each) — best-effort.
+ *   with fetched main-content markdown (≤1500 chars each) — best-effort,
+ *   bounded by a 45 s wall-clock budget.
  *
- * Instant Answer behavior: if DDG's zero-click API returns an abstract for the
- * query, a synthetic result `{ title: "Instant Answer", url: "", snippet }` is
- * prepended; it counts toward `max_results`. An empty organic result set is a
- * terminal success and returns `[]` — only engine/network failures throw.
+ * Every result carries `fetched_at` (UTC epoch ms) so consumers can gauge
+ * staleness. An empty organic result set is terminal success → `[]`; errors
+ * are only propagated when NO engine completed at all.
  */
 export async function searchWeb(
   query: string,
@@ -127,66 +157,76 @@ export async function searchWeb(
   const max = Math.max(1, Math.min(30, maxResults));
   const currentPage = Math.max(1, Math.min(10, page));
 
-  const engines: Array<{ url: string; parse: (html: string) => SearchResult[] }> = [
+  const engines = [
     {
       url: ddgSearchUrl(query, currentPage),
-      parse: (html) => parseDuckDuckGo(html, "https://duckduckgo.com/"),
+      parse: (html: string) => parseDuckDuckGo(html, "https://duckduckgo.com/"),
     },
     {
       url: bingSearchUrl(query, currentPage),
-      parse: (html) => parseBing(html, "https://www.bing.com/"),
+      parse: (html: string) => parseBing(html, "https://www.bing.com/"),
     },
   ];
 
-  const instantAnswer = await fetchInstantAnswer(query);
+  // Fire the instant-answer probe and both engine renders in parallel.
+  const controller = new AbortController();
+  let winner: SearchResult[] | null = null;
 
-  let organic: SearchResult[] = [];
-  let lastError: unknown = null;
-  let anyEngineCompleted = false;
-  for (const engine of engines) {
-    await assertSafeUrl(engine.url);
-    try {
-      await browshManager.ensureStarted();
-      const dom = await browshManager.fetchDom(engine.url);
-      organic = engine.parse(dom);
-      anyEngineCompleted = true;
-      if (organic.length > 0) break;
-    } catch (e) {
-      lastError = e;
-    }
-  }
+  const [instantAnswer, engineOutcomes] = await Promise.all([
+    fetchInstantAnswer(query),
+    Promise.allSettled(
+      engines.map(async (engine) => {
+        const results = await renderEngine(engine, controller.signal);
+        if (winner === null && results.length > 0) {
+          winner = results;
+          controller.abort(); // the other engine's render is no longer needed
+        }
+        return results;
+      })
+    ),
+  ]);
 
-  // Only propagate an engine error if NO engine succeeded at all.
-  // If any engine returned zero results cleanly, that's terminal success [].
-  if (organic.length === 0 && !anyEngineCompleted && lastError !== null) {
-    if (lastError instanceof Error) throw lastError;
+  const completedEngines = engineOutcomes.filter((o) => o.status === "fulfilled").length;
+  // Explicit annotation: TS cannot track closure assignments to `winner`, so
+  // an uninferred `?? []` would narrow to never[] and break downstream access.
+  const organic: SearchResult[] = winner ?? [];
+
+  if (organic.length === 0 && completedEngines === 0) {
+    // No engine even completed — surface the underlying failure instead of a
+    // misleading empty result set. (If any engine completed cleanly with zero
+    // results, that's terminal success `[]`.)
+    const reason = engineOutcomes
+      .map((o) => (o.status === "rejected" ? o.reason : null))
+      .find((r) => r !== null);
+    if (reason instanceof Error) throw reason;
     throw new FetchError(`No results found for query: ${query}`);
   }
 
   // Enrichment: replace the top-3 organic snippets with fetched main-content
-  // markdown. Best-effort — a rejected fetch keeps the original snippet.
+  // markdown. Best-effort, sequential, and hard-bounded by a wall-clock budget
+  // so enrichment can never push a search past the client's request timeout.
   if (enrich && organic.length > 0) {
-    const top = organic.slice(0, 3);
-    const settled = await Promise.allSettled(
-      top.map((r) =>
-        fetchWeb({ url: r.url, type: "markdown", max_chars: 1500 })
-      )
-    );
-    settled.forEach((outcome, i) => {
-      if (outcome.status === "fulfilled") {
-        top[i]!.snippet = outcome.value.trim();
-      } else {
+    const deadline = Date.now() + ENRICH_BUDGET_MS;
+    for (const result of organic.slice(0, 3)) {
+      if (Date.now() > deadline) break;
+      try {
+        const markdown = await fetchWeb({ url: result.url, type: "markdown", max_chars: 1500 });
+        result.snippet = markdown.trim();
+      } catch (e) {
         console.error(
-          `[searchWeb] Enrichment failed for ${top[i]?.url}: ${
-            outcome.reason instanceof Error ? outcome.reason.message : outcome.reason
+          `[searchWeb] Enrichment failed for ${result.url}: ${
+            e instanceof Error ? e.message : String(e)
           }`
         );
       }
-    });
+    }
   }
 
+  const now = Date.now();
   const results: SearchResult[] = [];
-  if (instantAnswer) results.push({ title: "Instant Answer", url: "", snippet: instantAnswer });
-  results.push(...organic);
+  if (instantAnswer) {
+    results.push({ title: "Instant Answer", url: "", snippet: instantAnswer, fetched_at: now });
+  }
+  for (const r of organic) results.push({ ...r, fetched_at: now });
   return results.slice(0, max);
 }

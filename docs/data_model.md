@@ -53,9 +53,14 @@ the original snippet.
 
 ```json
 [
-  { "title": "Browsh", "url": "https://www.brow.sh/", "snippet": "…" }
+  { "title": "Browsh", "url": "https://www.brow.sh/", "snippet": "…", "fetched_at": 1754250000000 }
 ]
 ```
+
+Each result carries `fetched_at` (UTC epoch milliseconds, per `docs/conventions.md`)
+so consumers can assess staleness. The synthetic Instant Answer result uses the
+same field. Engines are rendered concurrently; an empty organic result set is
+terminal success `[]`.
 
 ### 3. `extract_links`
 

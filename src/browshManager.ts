@@ -54,7 +54,7 @@ class BrowshManager {
       // the profile lock and blocks every subsequent restart.
       detached: true,
     });
-    const ready = await this.waitForReady(10000);
+    const ready = await this.waitForReady(30000);
     if (!ready) {
       await this.shutdown();
       throw new FetchError(`Browsh did not start in HTTP mode within timeout`);
@@ -108,10 +108,14 @@ class BrowshManager {
    * reset and a recycle decision is made — both strictly OUTSIDE the critical
    * section so no cycle can be entered mid-request.
    */
-  private async fetchRaw(url: string, mode: "PLAIN" | "DOM"): Promise<string> {
+  private async fetchRaw(
+    url: string,
+    mode: "PLAIN" | "DOM",
+    signal?: AbortSignal
+  ): Promise<string> {
     await this.acquire();
     try {
-      return await this.fetchRawInner(url, mode, false);
+      return await this.fetchRawInner(url, mode, false, signal);
     } finally {
       this.release();
       this.resetIdleTimer();
@@ -128,7 +132,8 @@ class BrowshManager {
   private async fetchRawInner(
     url: string,
     mode: "PLAIN" | "DOM",
-    retried: boolean
+    retried: boolean,
+    signal?: AbortSignal
   ): Promise<string> {
     const justCycled = Date.now() - this.lastCycleAt < 2000;
     if (!this.isRunning) {
@@ -140,7 +145,7 @@ class BrowshManager {
           url
         );
         await this.ensureStarted();
-        return this.fetchRawInner(url, mode, true);
+        return this.fetchRawInner(url, mode, true, signal);
       }
       throw new FetchError("Browsh not running", { url });
     }
@@ -149,10 +154,15 @@ class BrowshManager {
       const res = await axios.get(browshUrl, {
         headers: { "X-Browsh-Raw-Mode": mode },
         timeout: this.requestTimeoutMs,
+        signal,
       });
       this.requestCount++;
       return res.data as string;
     } catch (error) {
+      // Caller-initiated cancellation (engine race abort) passes through.
+      if (axios.isCancel(error) || (axios.isAxiosError(error) && error.code === "ERR_CANCELED")) {
+        throw error;
+      }
       if (axios.isAxiosError(error) && error.response?.status) {
         const status = error.response.status;
         // A dying instance can answer 5xx right before teardown completes —
@@ -165,7 +175,7 @@ class BrowshManager {
           );
           this.clearProcess();
           await this.ensureStarted();
-          return this.fetchRawInner(url, mode, true);
+          return this.fetchRawInner(url, mode, true, signal);
         }
         const body = typeof error.response.data === "string" ? error.response.data : "";
         throw new FetchError(
@@ -173,18 +183,25 @@ class BrowshManager {
           { statusCode: status, url }
         );
       }
-      // Transport-level failure (timeout, ECONNRESET, refused). If a recycle
-      // or idle kill happened within the last 2s, the browser is the culprit —
-      // respawn and retry once.
-      if (!retried && justCycled) {
+      // Transport-level failure (timeout, ECONNRESET, refused). Retry once
+      // when the browser was recently cycled OR is clearly down (ECONNREFUSED
+      // means the renderer port is gone — e.g. the browser crashed on its own,
+      // which no recycle path had a chance to record).
+      const isBrowserDown =
+        axios.isAxiosError(error) &&
+        (error.code === "ECONNREFUSED" ||
+          error.code === "ECONNRESET" ||
+          error.code === "EHOSTUNREACH" ||
+          error.code === "ENETUNREACH");
+      if (!retried && (justCycled || isBrowserDown)) {
         console.error(
-          "[browshManager] Retrying '%s' after browser recycle (%s)",
+          "[browshManager] Retrying '%s' after browser teardown (%s)",
           url,
           error instanceof Error ? error.message : String(error)
         );
         this.clearProcess();
         await this.ensureStarted();
-        return this.fetchRawInner(url, mode, true);
+        return this.fetchRawInner(url, mode, true, signal);
       }
       if (axios.isAxiosError(error)) {
         throw new FetchError(`Request failed: ${error.message}`, { url });
@@ -280,13 +297,13 @@ class BrowshManager {
   }
 
   /** Fetches JS-rendered plain text. */
-  async fetchPlain(url: string): Promise<string> {
-    return this.fetchRaw(url, "PLAIN");
+  async fetchPlain(url: string, signal?: AbortSignal): Promise<string> {
+    return this.fetchRaw(url, "PLAIN", signal);
   }
 
   /** Fetches JS-rendered HTML (DOM). */
-  async fetchDom(url: string): Promise<string> {
-    return this.fetchRaw(url, "DOM");
+  async fetchDom(url: string, signal?: AbortSignal): Promise<string> {
+    return this.fetchRaw(url, "DOM", signal);
   }
 
   /** Cleanly shutdown process (called once at server exit). */
