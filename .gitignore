@@ -82,3 +82,5 @@ dist/
 
 # Don't ignore lock file (important for reproducibility, remove from ignore)
 # package-lock.json
+# Custom Context MCP reports
+context-reports/

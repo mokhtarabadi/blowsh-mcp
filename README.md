@@ -188,8 +188,8 @@ This README is the user-facing entry point; agent-facing rules live in `AGENTS.m
 
 | Name             | Params                                                                                                                                                                                                                          | AI Use-case/Description                                                                                                                                                                                                                 |
 |------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| fetch_web        | `{ url, type: "plain"\|"html"\|"markdown", selector?, max_chars?, wait_ms? }`                                                                                                                                                 | Fetch one page post-JS-render as text/HTML/Markdown. `selector` (CSS) extracts only the matched element; `max_chars` caps output; `wait_ms` polls until JS settles.        |
-| search_web       | `{ query: string, max_results?: number }`                                                                                                                                                                                      | Search the web (DuckDuckGo HTML, Bing fallback) and return `[{title, url, snippet}]`. Feed result URLs to fetch_web/extract_links.                                          |
+| fetch_web        | `{ url, type: "plain"\|"html"\|"markdown"\|"pdf", selector?, max_chars?, wait_ms? }`                                                                     | Fetch one page post-JS-render as text/HTML/Markdown. `selector` (CSS) extracts only the matched element; `max_chars` caps output; `wait_ms` polls until JS settles. `type: pdf` downloads the PDF directly (20 MB max) and extracts text via pdftotext — `selector`/`wait_ms`/`max_chars` do not apply. |
+| search_web       | `{ query: string, max_results?: number, page?: number, enrich?: boolean }`                                                                                                                                            | Search the web (DuckDuckGo HTML, Bing fallback) and return `[{title, url, snippet}]`. `page` 1–10 for pagination; `enrich: true` replaces top-3 snippets with fetched markdown content. Feed result URLs to fetch_web/extract_links. |
 | extract_links    | `{ url: string, limit?: number }`                                                                                                                                                                                             | Return all hyperlinks (`{text, url}`, absolute) present on a JS-rendered page, for navigation following without full DOM dumps.                                                  |
 | fetch_web_batch  | `{ urls: string[], type: "plain"\|"html"\|"markdown", selector?, max_chars?, wait_ms? }`                                                                                                                                 | Fetch up to 10 URLs in one call (cache-aware). Returns per-URL `{url, ok, content\|error}` — one failure never kills the batch.                                       |
 
@@ -197,6 +197,7 @@ This README is the user-facing entry point; agent-facing rules live in `AGENTS.m
 - `type: plain`: Terminal-style, JS-executed readable text (or error string).
 - `type: html`: Post-JS HTML markup string (or error string). With `selector`, only the matched element's HTML.
 - `type: markdown`: Markdown conversion of the main content or selected element (or error string). Links, headings, lists, and page structure retained for AI-friendly context.
+- `type: pdf`: extracted plain text from the PDF document (via pdftotext, 20 MB cap).
 - Errors are **structured**: an MCP response with `isError: true` and a `FetchError` message that includes the HTTP status when knowable (never a silent empty string).
 
 ---
@@ -210,6 +211,9 @@ Set these via `.env` (loaded automatically) or the environment:
 | `BROWSH_FIREFOX_PATH`       | `firefox`     | Firefox binary used by Browsh (e.g. `/usr/bin/firefox-esr`).             |
 | `HTML2MARKDOWN_PATH`        | `html2markdown` | Path to the html2markdown binary.                                      |
 | `BROWSH_REQUEST_TIMEOUT_MS` | `30000`       | Per-render request timeout (ms).                                          |
+| `PDF_MAX_BYTES`             | `20971520`    | Max PDF file size in bytes for `fetch_web type: pdf`.                    |
+| `BROWSH_RECYCLE_REQUESTS`   | `100`         | Number of requests after which the browser process is recycled.          |
+| `BROWSH_IDLE_TIMEOUT_MS`    | `600000`      | Idle time in ms before the browser process is killed (10 min).           |
 | `CACHE_TTL_MS`              | `300000`      | In-memory render cache TTL (ms).                                          |
 | `ALLOW_PRIVATE_URLS`        | `false`       | Set `true` to disable the SSRF guard for loopback/private targets.        |
 | `MCP_TRANSPORT`             | `stdio`       | Transport type (only `stdio` implemented).                                |

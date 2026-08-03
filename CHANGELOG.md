@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.1.0] - 2026-08-03
+
+### Added
+- `search_web`: `page` parameter for paginated search results (1–10, DuckDuckGo & Bing offset synthesis).
+- `search_web`: DuckDuckGo Instant Answer fast path — zero-click abstracts surfaced as a synthetic result when available.
+- `search_web`: `enrich` opt-in flag — top-3 result snippets replaced with fetched markdown content (≤1500 chars).
+- `fetch_web`: `type: "pdf"` — SSRF-guarded direct PDF download with pdftotext extraction (configurable size cap `PDF_MAX_BYTES`, default 20 MB).
+- `browshManager`: request-count-based process recycling (`BROWSH_RECYCLE_REQUESTS`, default 100).
+- `browshManager`: idle timeout with automatic kill + cache mop (`BROWSH_IDLE_TIMEOUT_MS`, default 10 min).
+
+### Changed
+- Bumped version to 2.1.0.
+- Dockerfile: added `poppler-utils` for PDF text extraction.
+
 ## [2.0.0] - 2026-08-02
 
 ### Added
@@ -19,12 +33,3 @@
 - Node engine requirement raised to `>=20.18.1` (zod 4).
 - Dockerfile: multi-stage build, html2markdown bumped to v2.5.2, `BROWSH_FIREFOX_PATH` set to `/usr/bin/firefox-esr`.
 - MCP server version reported as 2.0.0.
-
-## [Unreleased]
-- Markdown conversion now uses the [html2markdown CLI](https://github.com/JohannesKaufmann/html-to-markdown) for higher fidelity and plugin support.
-- Added `src/tools/html2markdownManager.ts` as a wrapper for the CLI.
-- Updated Dockerfile to install html2markdown CLI.
-- Updated `.env` and `.env.example` to support `HTML2MARKDOWN_PATH`.
-- Updated README with new requirements and configuration options.
-- Unified all fetch tools into `fetch_web` with a `type` parameter.
-- Cleaned up project by removing legacy fetch tools.

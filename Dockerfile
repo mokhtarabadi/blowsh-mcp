@@ -26,7 +26,7 @@ ENV HTML2MARKDOWN_PATH=html2markdown
 # Install Firefox (Browsh backend), Browsh CLI, and the html2markdown CLI — a fat image
 # includes every external binary the server needs, so no host-side deps are required.
 RUN apt-get update && \
-    apt-get install -y ca-certificates wget firefox-esr fonts-liberation && \
+    apt-get install -y ca-certificates wget firefox-esr fonts-liberation poppler-utils && \
     wget -q -O /usr/local/bin/browsh https://github.com/browsh-org/browsh/releases/download/v1.8.0/browsh_1.8.0_linux_amd64 && \
     chmod +x /usr/local/bin/browsh && \
     wget -q -O /tmp/html2markdown.deb "https://github.com/JohannesKaufmann/html-to-markdown/releases/download/v2.5.2/html2markdown_2.5.2_linux_amd64.deb" && \

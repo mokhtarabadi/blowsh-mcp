@@ -1,5 +1,6 @@
 import { browshManager } from "../browshManager.js";
 import { html2markdownConvert } from "../html2markdownManager.js";
+import { extractPdf } from "./extractPdf.js";
 import { assertSafeUrl } from "../ssrf.js";
 import { pageCache, cacheKey } from "../cache.js";
 import { extractMainHtml, selectText, selectHtml, truncate } from "../extract.js";
@@ -7,13 +8,13 @@ import { FetchError } from "../errors.js";
 
 export interface FetchWebOptions {
   url: string;
-  type: "plain" | "html" | "markdown";
+  type: "plain" | "html" | "markdown" | "pdf";
   selector?: string;
   max_chars?: number;
   wait_ms?: number;
 }
 
-const TYPES = ["plain", "html", "markdown"] as const;
+const TYPES = ["plain", "html", "markdown", "pdf"] as const;
 const SETTLE_INTERVAL_MS = 700;
 
 function validateUrl(url: string): void {
@@ -27,17 +28,32 @@ function validateUrl(url: string): void {
  * Throws FetchError on failure so clients can detect errors structurally.
  *
  * @param selector When set, only the matched element is returned (text for
- *   `plain`, inner HTML for `html`/`markdown`).
- * @param max_chars Caps the returned output length.
+ *   `plain`, inner HTML for `html`/`markdown`). Ignored for `pdf`.
+ * @param max_chars Caps the returned output length. Not applied to `pdf`.
  * @param wait_ms When > 0, polls until the rendered DOM is stable (JS has
- *   settled) or the total wait budget is exhausted.
+ *   settled) or the total wait budget is exhausted. Ignored for `pdf`.
+ *
+ * `type: "pdf"` bypasses the browser entirely: the PDF is downloaded directly
+ * (SSRF-guarded), size-capped, and piped through `pdftotext`. `selector`,
+ * `max_chars`, and `wait_ms` are silently ignored for this type.
  */
 export async function fetchWeb(opts: FetchWebOptions): Promise<string> {
   const { url, type, selector, max_chars, wait_ms } = opts;
   validateUrl(url);
   await assertSafeUrl(url);
   if (!TYPES.includes(type)) {
-    throw new FetchError("Unknown type; use one of: plain, html, markdown.", { url });
+    throw new FetchError("Unknown type; use one of: plain, html, markdown, pdf.", { url });
+  }
+
+  // PDF path: no browser, no settle polling, no truncation. Cache the
+  // extracted text only (never the raw bytes).
+  if (type === "pdf") {
+    const pdfKey = cacheKey(url, "pdf");
+    const cached = pageCache.get(pdfKey);
+    if (cached) return cached;
+    const text = await extractPdf(url);
+    pageCache.set(pdfKey, text);
+    return text;
   }
 
   const key = cacheKey(url, settleKey(opts));
@@ -68,6 +84,14 @@ async function render(opts: FetchWebOptions): Promise<string> {
 
 async function renderOnce(opts: FetchWebOptions): Promise<string> {
   const { url, type, selector } = opts;
+
+  // pdf is handled entirely in fetchWeb() before render() is ever called. If
+  // we land here with type "pdf", a regression moved the early-path: fail loud.
+  if (type === "pdf") {
+    throw new FetchError("Internal error: pdf type must not reach renderOnce", {
+      url,
+    });
+  }
 
   // plain without selector → Browsh terminal text (fast path)
   if (type === "plain" && !selector) {

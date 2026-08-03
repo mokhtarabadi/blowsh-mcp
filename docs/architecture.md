@@ -15,8 +15,9 @@ blowsh-mcp/
 │   ├── extract.ts                  # Main-content extraction, CSS selector helpers, truncation
 │   ├── errors.ts                   # FetchError + message formatting
 │   └── tools/
-│       ├── fetchWeb.ts             # fetch_web: plain/html/markdown + selector/max_chars/wait_ms
-│       ├── searchWeb.ts            # search_web: DuckDuckGo HTML + Bing fallback parsers
+│       ├── fetchWeb.ts             # fetch_web: plain/html/markdown/pdf + selector/max_chars/wait_ms
+│       ├── extractPdf.ts           # type: pdf — SSRF-guarded download → pdftotext (size-capped)
+│       ├── searchWeb.ts            # search_web: pagination, DDG instant answer, enrich
 │       ├── extractLinks.ts         # extract_links: hyperlinks from rendered DOM
 │       └── fetchWebBatch.ts        # fetch_web_batch: multi-URL, per-URL error isolation
 ├── docs/                           # conventions.md, architecture.md, data_model.md
@@ -59,11 +60,13 @@ blowsh-mcp/
 - Lazy-starts `browsh --http-server-mode` once; health-probes `http://127.0.0.1:4333/` for readiness.
 - `fetchRaw(url, mode)` GETs `127.0.0.1:4333/<url>` with `X-Browsh-Raw-Mode`; translates HTTP failures into `FetchError` with status code.
 - Port/host are fixed by Browsh (not configurable). Request timeout configurable via `BROWSH_REQUEST_TIMEOUT_MS`.
+- **Session health (v2.1):** a mutex serializes all renders. The process is recycled after `BROWSH_RECYCLE_REQUESTS` requests and killed after `BROWSH_IDLE_TIMEOUT_MS` idle (cache-mopped). Recycle/idle only fire in quiescent windows (`busy=false`, no waiters — `scheduleRecycle` defers via `setImmediate`) and tear down the whole process group (`detached: true` + negative-PID SIGTERM/SIGKILL) so orphaned Firefox child processes never hold the profile lock or block restarts. One-shot transport retry after a recycle.
 
 ### 3.3. Fetch Tools (`src/tools/`)
 
-- `fetchWeb`: plain (Browsh PLAIN), html (Browsh DOM), markdown (DOM + main-content extraction + html2markdown CLI). Optional `selector` (CSS), `max_chars`, `wait_ms` (JS-settle polling until DOM stable).
-- `searchWeb`: renders DuckDuckGo HTML, falls back to Bing; returns `{title, url, snippet}[]`.
+- `fetchWeb`: plain (Browsh PLAIN), html (Browsh DOM), markdown (DOM + main-content extraction + html2markdown CLI), pdf (bypasses browser: SSRF-guarded direct download → `pdftotext`, size-capped via `PDF_MAX_BYTES`). Optional `selector` (CSS), `max_chars`, `wait_ms` (JS-settle polling until DOM stable) — ignored for `pdf`.
+- `extractPdf`: direct axios stream (SSRF-guarded, Content-Type + Content-Length + streaming size caps) piped through `pdftotext - -`; text-only caching.
+- `searchWeb`: renders DuckDuckGo HTML, falls back to Bing; returns `{title, url, snippet}[]`. `page` (1-10) synthesizes engine offsets; DuckDuckGo Instant Answer API is probed first (graceful null on any failure), and optional `enrich` replaces top-3 snippets via cache-aware fetches.
 - `extractLinks`: parses `a[href]` from rendered DOM; absolute URL resolution; non-web protocols skipped.
 - `fetchWebBatch`: up to 10 URLs sequentially; per-URL `{url, ok, content|error}` — never fails wholesale.
 
@@ -103,7 +106,6 @@ blowsh-mcp/
 
 ## 9. Future Considerations / Roadmap
 
-- Search pagination support in `search_web`.
-- PDF-to-text extraction path.
+- Search pagination beyond page 10 / query-variant automation.
 - Multi-tab backpressure / tab-recycling after long sessions.
 - SSRF allowlist enrichment (public suffix validation, blocked TLD lists).

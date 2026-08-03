@@ -19,19 +19,21 @@ dotenv.config({ quiet: true });
 const tools = [
   ToolSchema.parse({
     name: "fetch_web",
-    title: "Fetch Web (plain, html, markdown)",
+    title: "Fetch Web (plain, html, markdown, pdf)",
     description:
-      "Fetch a web page and return its content as plain text, HTML, or Markdown after full JS rendering. " +
+      "Fetch a web page and return its content as plain text, HTML, Markdown, or PDF-extracted text after full JS rendering. " +
       "Use `type` to select the output shape; `selector` (CSS) to extract only the matched element; " +
-      "`max_chars` to cap output length; `wait_ms` to keep polling until the page's JavaScript has settled.",
+      "`max_chars` to cap output length; `wait_ms` to keep polling until the page's JavaScript has settled. " +
+      "`type: \"pdf\"` downloads the PDF directly (SSRF-guarded, 20 MB cap) and extracts text via pdftotext — " +
+      "`selector`, `max_chars`, and `wait_ms` are ignored for PDFs.",
     inputSchema: {
       type: "object",
       properties: {
         url: { type: "string", description: "The HTTP/HTTPS web URL to fetch" },
-        type: { type: "string", enum: ["plain", "html", "markdown"], description: "Output type: plain, html, or markdown" },
-        selector: { type: "string", description: "Optional CSS selector; only the matched element is returned" },
-        max_chars: { type: "number", description: "Optional cap on output length in characters" },
-        wait_ms: { type: "number", description: "Optional JS settle polling budget in ms (default 0 = single render)" },
+        type: { type: "string", enum: ["plain", "html", "markdown", "pdf"], description: "Output type: plain, html, markdown, or pdf (text)" },
+        selector: { type: "string", description: "Optional CSS selector; only the matched element is returned (ignored for pdf)" },
+        max_chars: { type: "number", description: "Optional cap on output length in characters (ignored for pdf)" },
+        wait_ms: { type: "number", description: "Optional JS settle polling budget in ms (default 0 = single render; ignored for pdf)" },
       },
       required: ["url", "type"],
     },
@@ -47,6 +49,8 @@ const tools = [
       properties: {
         query: { type: "string", description: "Search query" },
         max_results: { type: "number", description: "Max results to return (1-30, default 10)" },
+        page: { type: "number", description: "Result page (1-10, default 1); offsets are synthesized per engine" },
+        enrich: { type: "boolean", description: "When true, top-3 snippets are replaced with fetched markdown (best-effort)" },
       },
       required: ["query"],
     },
@@ -91,7 +95,7 @@ type ToolName = (typeof tools)[number]["name"];
 const selectors = {
   fetch_web: z.object({
     url: z.string(),
-    type: z.enum(["plain", "html", "markdown"]),
+    type: z.enum(["plain", "html", "markdown", "pdf"]),
     selector: z.string().optional(),
     max_chars: z.number().int().min(100).max(2_000_000).optional(),
     wait_ms: z.number().int().min(0).max(60_000).optional(),
@@ -99,6 +103,8 @@ const selectors = {
   search_web: z.object({
     query: z.string().min(1),
     max_results: z.number().int().min(1).max(30).optional(),
+    page: z.number().int().min(1).max(10).optional(),
+    enrich: z.boolean().optional(),
   }),
   extract_links: z.object({
     url: z.string(),
@@ -128,8 +134,12 @@ async function route(name: ToolName, args: unknown): Promise<string> {
       return fetchWeb({ url, type, selector, max_chars, wait_ms });
     }
     case "search_web": {
-      const { query, max_results } = selectors.search_web.parse(args);
-      return JSON.stringify(await searchWeb(query, max_results), null, 2);
+      const { query, max_results, page, enrich } = selectors.search_web.parse(args);
+      return JSON.stringify(
+        await searchWeb(query, max_results ?? 10, page ?? 1, enrich ?? false),
+        null,
+        2
+      );
     }
     case "extract_links": {
       const { url, limit } = selectors.extract_links.parse(args);
@@ -148,7 +158,7 @@ async function runServer() {
   const server = new Server(
     {
       name: "blowsh-mcp",
-      version: "2.0.0",
+      version: "2.1.0",
     },
     {
       capabilities: { tools: {} },

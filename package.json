@@ -1,6 +1,6 @@
 {
   "name": "blowsh-mcp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "An MCP server exposing Browsh (the JavaScript-capable terminal browser) to AIs and agents over the Model Context Protocol.",
   "author": "Mohammad Reza Mokhtarabadi <mmokhtarabadi@gmail.com>",
   "license": "MIT",
