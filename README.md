@@ -256,6 +256,23 @@ Tools throw `FetchError` and MCP returns `isError: true` with an actionable mess
 }
 ```
 
+**Example config for opencode (project `opencode.json`):**
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "blowsh": {
+      "type": "local",
+      "command": ["docker", "run", "--rm", "-i", "blowsh-mcp:latest"],
+      "enabled": true,
+      "timeout": 30000
+    }
+  },
+  "permission": { "blowsh_*": "allow" }
+}
+```
+The Docker form needs no host-side binaries; the image bundles Firefox, Browsh, and html2markdown. Restart opencode after saving (config is loaded once at startup).
+
 ---
 
 ## Graceful Shutdown
