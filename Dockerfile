@@ -18,6 +18,10 @@ RUN npm prune --omit=dev --ignore-scripts
 # ---------- Stage 2: fat runtime image with everything bundled ----------
 FROM node:22-slim
 LABEL maintainer="Mohammad Reza Mokhtarabadi <mmokhtarabadi@gmail.com>"
+LABEL org.opencontainers.image.title="blowsh-mcp"
+LABEL org.opencontainers.image.description="MCP server exposing Browsh (JS-capable terminal browser) to AI agents"
+LABEL org.opencontainers.image.source="https://github.com/mokhtarabadi/blowsh-mcp"
+LABEL org.opencontainers.image.licenses="MIT"
 
 ENV NODE_ENV=production
 ENV BROWSH_FIREFOX_PATH=/usr/bin/firefox-esr

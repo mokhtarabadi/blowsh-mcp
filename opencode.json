@@ -3,7 +3,7 @@
   "mcp": {
     "blowsh": {
       "type": "local",
-      "command": ["docker", "run", "--rm", "-i", "blowsh-mcp:latest"],
+      "command": ["docker", "run", "--rm", "-i", "ghcr.io/mokhtarabadi/blowsh-mcp:latest"],
       "enabled": true,
       "timeout": 120000
     }

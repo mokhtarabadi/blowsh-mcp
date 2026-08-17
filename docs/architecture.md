@@ -22,6 +22,7 @@ blowsh-mcp/
 │       └── fetchWebBatch.ts        # fetch_web_batch: multi-URL, per-URL error isolation
 ├── docs/                           # conventions.md, architecture.md, data_model.md
 ├── tasks/                          # Kanban workflow (backlog/in-progress/qa/completed/archive)
+├── .github/workflows/              # docker-publish.yml: CI/CD build → ghcr.io
 ├── Dockerfile                      # Multi-stage: build TS, bundle Firefox+Browsh+html2markdown
 ├── .opencode/skills/               # Workspace-local agent skills (optional)
 ├── .env.example                    # Documented configuration surface
@@ -88,7 +89,9 @@ blowsh-mcp/
 
 ## 6. Deployment & Infrastructure
 
-- **Provider:** Any server with Docker; runs completely offline-of-host once the image is built.
+- **Provider:** Any server with Docker; runs completely offline-of-host once the image is pulled.
+- **Distribution:** Prebuilt image on GitHub Container Registry — `ghcr.io/mokhtarabadi/blowsh-mcp:latest` (also tagged `2.2.0`, branch, semver, and `sha-<sha>`). Pull with `docker pull ghcr.io/mokhtarabadi/blowsh-mcp:latest`.
+- **CI/CD:** GitHub Actions (`.github/workflows/docker-publish.yml`) builds the Dockerfile and pushes to ghcr on `main` pushes and `v*` tags, with a container smoke test (MCP initialize → tools/list) before the run completes.
 - **Form factor:** MCP server over stdio (no listening port). The Browsh HTTP port stays container-private.
 - **CI/CD:** none currently; verify with build + `docker build` + JSON-RPC smoke test.
 

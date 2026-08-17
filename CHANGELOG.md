@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.0] - 2026-08-17
+
+### Added
+- Prebuilt container image published to GitHub Container Registry: `ghcr.io/mokhtarabadi/blowsh-mcp:latest`. New Docker users can pull and run the server directly without building locally.
+- CI/CD: GitHub Actions workflow `.github/workflows/docker-publish.yml` builds and pushes the image on `main` pushes and `v*` tags (tag set: `latest`, branch, semver, `sha-<sha>`), with a container smoke test (MCP initialize → tools/list) that fails the run if the tool surface is broken.
+- OCI provenance labels on the Docker image (`org.opencontainers.image.*`).
+
+### Changed
+- Bumped version to 2.2.0 (`package.json` + server-reported MCP version).
+- README documents the prebuilt image (Quick Start) and opencode config examples now use `ghcr.io/mokhtarabadi/blowsh-mcp:latest` with a 120 s timeout.
+- `docs/architecture.md` deployment section updated with registry + CI/CD distribution path.
+
 ## [2.1.1] - 2026-08-03
 
 ### Fixed

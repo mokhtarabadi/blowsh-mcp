@@ -44,6 +44,22 @@ Mnemonic: “blowsh” = Browsh-powered MCP server.
 
 ---
 
+## Quick Start (Docker — Prebuilt Image)
+
+The image is published to **GitHub Container Registry** and rebuilt automatically on
+every `main` push via GitHub Actions — no host-side Firefox/Browsh/html2markdown needed:
+
+```sh
+docker pull ghcr.io/mokhtarabadi/blowsh-mcp:latest
+docker run --rm -i ghcr.io/mokhtarabadi/blowsh-mcp:latest
+```
+
+> The `-i` flag is mandatory: the MCP server speaks JSON-RPC over stdin/stdout. Keep it
+> interactive and pipe requests, or point your MCP client at it (see
+> [AI Client Configuration](#mcp-protocol-ai-client-configuration) below).
+
+---
+
 ## Example Usage
 
 **From Claude, Cursor, or any MCP-enabled agent:**
@@ -103,6 +119,7 @@ AI receives:
 - `src/errors.ts` — `FetchError` + message formatting.
 - `README.md` — This file.
 - `Dockerfile` — Multi-stage container (builds TS, bundles Firefox, Browsh, html2markdown).
+- `.github/workflows/docker-publish.yml` — CI/CD: builds and publishes the image to ghcr.io on `main`/`v*`.
 - `.env` — Config overrides. See `.env.example` for all options.
 
 ---
@@ -124,7 +141,9 @@ AI receives:
   - Or use the prebuilt binary for your OS from the [releases page](https://github.com/JohannesKaufmann/html-to-markdown/releases).
 
 > Prefer Docker? Skip the host-side installs entirely — the multi-stage image bundles
-> Firefox, Browsh, and html2markdown:
+> Firefox, Browsh, and html2markdown. The fastest path is the published image
+> (`ghcr.io/mokhtarabadi/blowsh-mcp:latest`, see [Quick Start](#quick-start-docker--prebuilt-image));
+> to build it yourself:
 > ```sh
 > docker build -t blowsh-mcp:latest .
 > docker run --rm -i blowsh-mcp:latest
@@ -263,9 +282,9 @@ Tools throw `FetchError` and MCP returns `isError: true` with an actionable mess
   "mcp": {
     "blowsh": {
       "type": "local",
-      "command": ["docker", "run", "--rm", "-i", "blowsh-mcp:latest"],
+      "command": ["docker", "run", "--rm", "-i", "ghcr.io/mokhtarabadi/blowsh-mcp:latest"],
       "enabled": true,
-      "timeout": 30000
+      "timeout": 120000
     }
   },
   "permission": { "blowsh_*": "allow" }
