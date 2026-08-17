@@ -1,9 +1,9 @@
 # Task 03: Blowsh-MCP v2.2 — Container Registry Distribution & CI/CD
 
-**File:** `tasks/completed/03-blowsh-mcp-v220-container-registry-cicd.md`
+**File:** `tasks/qa/03-blowsh-mcp-v220-container-registry-cicd.md`
 **Source:** manager
 **Type:** feature
-**Status:** closed
+**Status:** in-review
 
 ## Goal
 
@@ -49,8 +49,8 @@ Ship blowsh-mcp as a prebuilt container image on GitHub Container Registry (`ghc
 
 - **Test command:** `docker pull ghcr.io/mokhtarabadi/blowsh-mcp:latest && docker run --rm -i ghcr.io/mokhtarabadi/blowsh-mcp:latest` (MCP initialize → tools/list)
 - **Expected result:** image pulls without auth; server responds to initialize and lists `fetch_web`, `search_web`, `extract_links`, `fetch_web_batch`
-- **Actual result:** _(The Hands fill this during execution)_
-- **Exit code:** _(The Hands fill this during execution)_
+- **Actual result:** PASS — `docker manifest inspect ghcr.io/mokhtarabadi/blowsh-mcp:latest` succeeded anonymously (public package); local container smoke test registered all 4 tools; GitHub Actions run `32018294893` (1m32s) completed **success** with `SMOKE OK: tools/list registered fetch_web`
+- **Exit code:** 0
 
 ## Definition of Done
 
@@ -93,25 +93,19 @@ _Stage: implementation (2026-08-17)._
 - Manual ghcr image push also blocked for token scopes: `gh auth refresh -h github.com -s write:packages` is needed for future manual `docker push`; the CI workflow (GITHUB_TOKEN, `packages: write`) is unaffected.
 - ghcr package visibility will likely default to **private** after the first CI push — unauthenticated pulls need the package set public (GitHub UI or `gh api` with a PAT).
 
+### Post-closure fix & final verification (2026-08-17)
+
+- **CI run 1** (`32017729572`): image built + pushed to ghcr OK, but smoke test failed — `docker/metadata-action` tags with the **short** sha (`sha-c5fe7eb`), while the smoke test referenced the full `${{ github.sha }}` → `manifest unknown`. Fixed in `.github/workflows/docker-publish.yml` (`sha-${GITHUB_SHA:0:7}`), commit `4a659a4`.
+- **CI run 2** (`32018294893`): **completed success** (1m32s) — build + push + `SMOKE OK: tools/list registered fetch_web`.
+- **ghcr verification:** `ghcr.io/mokhtarabadi/blowsh-mcp:latest` pullable **anonymously** (public visibility confirmed by `docker manifest inspect`; `gh api` visibility query needs `read:packages` which the current token lacks).
+- **Tags published:** `latest`, `main`, `sha-<7>`, plus semver tags on `v*` releases.
+- **Global opencode config:** `~/.config/opencode/opencode.jsonc` blowsh MCP now runs `ghcr.io/mokhtarabadi/blowsh-mcp:latest` (timeout 120 s). Requires opencode restart to take effect (config loaded once at startup).
+- Non-blocking note: GitHub Actions deprecation warning — Node 20 actions (`actions/checkout@v4`, docker actions) will be forced to Node 24; consider bumping action majors in a future task.
+
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
 ```diff
-diff --git a/.github/workflows/docker-publish.yml b/.github/workflows/docker-publish.yml
-index e405514..923d028 100644
---- a/.github/workflows/docker-publish.yml
-+++ b/.github/workflows/docker-publish.yml
-@@ -56,9 +56,10 @@ jobs:
-           cache-to: type=gha,mode=max
- 
-       # Boot the built image over stdio and confirm the MCP tool surface is registered.
-+      # Note: metadata-action's `type=sha` tag uses the SHORT sha (sha-<7>), not ${{ github.sha }}.
-       - name: Smoke test (MCP initialize → tools/list)
-         run: |
--          IMAGE="${{ env.REGISTRY }}/${{ github.repository }}:sha-${{ github.sha }}"
-+          IMAGE="${{ env.REGISTRY }}/${{ github.repository }}:sha-${GITHUB_SHA:0:7}"
-           {
-             printf '%s\n' \
-               '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.1"}}}' \
+No code changes detected or staged.
 ```
 <!-- END_GIT_DIFF -->
