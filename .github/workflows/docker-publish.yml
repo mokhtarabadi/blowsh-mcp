@@ -56,9 +56,10 @@ jobs:
           cache-to: type=gha,mode=max
 
       # Boot the built image over stdio and confirm the MCP tool surface is registered.
+      # Note: metadata-action's `type=sha` tag uses the SHORT sha (sha-<7>), not ${{ github.sha }}.
       - name: Smoke test (MCP initialize → tools/list)
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ github.repository }}:sha-${{ github.sha }}"
+          IMAGE="${{ env.REGISTRY }}/${{ github.repository }}:sha-${GITHUB_SHA:0:7}"
           {
             printf '%s\n' \
               '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.1"}}}' \

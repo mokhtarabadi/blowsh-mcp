@@ -96,5 +96,22 @@ _Stage: implementation (2026-08-17)._
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-**Factual Git Diff:** Stored in Commit Hash: `31f04ad1a81649e8fc4568ca8dbe4265476e7b55`
+```diff
+diff --git a/.github/workflows/docker-publish.yml b/.github/workflows/docker-publish.yml
+index e405514..923d028 100644
+--- a/.github/workflows/docker-publish.yml
++++ b/.github/workflows/docker-publish.yml
+@@ -56,9 +56,10 @@ jobs:
+           cache-to: type=gha,mode=max
+ 
+       # Boot the built image over stdio and confirm the MCP tool surface is registered.
++      # Note: metadata-action's `type=sha` tag uses the SHORT sha (sha-<7>), not ${{ github.sha }}.
+       - name: Smoke test (MCP initialize → tools/list)
+         run: |
+-          IMAGE="${{ env.REGISTRY }}/${{ github.repository }}:sha-${{ github.sha }}"
++          IMAGE="${{ env.REGISTRY }}/${{ github.repository }}:sha-${GITHUB_SHA:0:7}"
+           {
+             printf '%s\n' \
+               '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.1"}}}' \
+```
 <!-- END_GIT_DIFF -->
