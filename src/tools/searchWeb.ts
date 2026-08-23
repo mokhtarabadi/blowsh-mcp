@@ -40,8 +40,11 @@ function decodeRedirect(href?: string): string | undefined {
       const u = new URL(href);
       const encoded = u.searchParams.get("u");
       if (encoded) {
+        // Bing prefixes the base64 payload with a 2-byte version tag (e.g. "a1").
+        // Strip it before decoding so the result is a clean URL.
+        const raw = encoded.length > 2 && !encoded.startsWith("http") ? encoded.slice(2) : encoded;
         // Bing uses URL-safe base64 (no padding, - instead of +, _ instead of /)
-        const std = encoded.replace(/-/g, "+").replace(/_/g, "/");
+        const std = raw.replace(/-/g, "+").replace(/_/g, "/");
         const padded = std + "=".repeat((4 - (std.length % 4)) % 4);
         const decoded = Buffer.from(padded, "base64").toString("utf-8");
         if (/^https?:\/\//i.test(decoded)) return decoded;

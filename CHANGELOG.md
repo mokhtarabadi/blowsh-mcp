@@ -3,11 +3,11 @@
 ## [2.2.1] - 2026-08-23
 
 ### Fixed
-- `search_web`: Bing search results now return real destination URLs instead of Bing redirect wrappers (`bing.com/ck/a?...`). Unified redirect decoding across DuckDuckGo (`uddg` param), Bing (`u` base64 param), and Google (`/url?q=` param) into a single `decodeRedirect()` function.
-- `fetch_web`: Added pre-fetch Content-Type sniff (5s timeout HEAD/GET probe) before invoking Browsh. Non-HTML endpoints (JSON APIs, plain text, SSL errors) now return immediately instead of wasting 30s on a Browsh timeout. Non-2xx statuses propagate with HTTP status code in the error message.
+- `search_web`: Bing search results now return real destination URLs instead of Bing redirect wrappers (`bing.com/ck/a?...`). Unified redirect decoding across DuckDuckGo (`uddg` param), Bing (`u` base64 param with 2-byte version prefix stripping), and Google (`/url?q=` param) into a single `decodeRedirect()` function.
+- `fetch_web`: Added pre-fetch Content-Type sniff (5s timeout HEAD/GET probe) before invoking Browsh. Non-HTML endpoints (JSON APIs, plain text, SSL errors) now return immediately instead of wasting 30s on a Browsh timeout. Non-2xx statuses propagate with HTTP status code in the error message. Fixed GET fallback that used `maxContentLength: 0` (rejected every response body).
 - `fetch_web` non-HTML fast path: Added 10 MB `maxContentLength` safety cap and `truncate()` to prevent OOM on oversized JSON/text responses. Exceeding the cap throws a descriptive `FetchError`.
-- `fetch_web` plain text: Rewrote `cleanPlainText()` to use regex-based blank-line stripping instead of `.trim()`, preserving content indentation (e.g. code blocks, indented paragraphs) while removing Browsh terminal padding.
-- `extract_links`: Navigation/header/footer/aside noise elements are now stripped before link collection, so content links get priority over navigation chrome.
+- `fetch_web` plain text: Rewrote `cleanPlainText()` to detect and strip the minimum consistent leading indentation across all content lines, removing Browsh terminal padding while preserving relative indentation (e.g. code blocks, indented paragraphs).
+- `extract_links`: Replaced simple semantic element stripping with scoring-based link ranking. Links are scored via URL depth, text descriptiveness, and DOM position heuristics. Noise links (login, settings, terms, status pages) are filtered out. Content links now consistently appear first.
 
 ### Changed
 - Bumped version to 2.2.1.

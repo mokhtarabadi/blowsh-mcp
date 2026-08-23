@@ -53,10 +53,13 @@ async function sniffContentType(url: string): Promise<SniffResult | null> {
     try {
       res = await axios.head(url, { timeout: SNIFF_TIMEOUT_MS, maxRedirects: 5 });
     } catch {
+      // GET fallback: no maxContentLength (some servers reject HEAD).
+      // The short timeout bounds latency; response body is discarded by caller.
       res = await axios.get(url, {
         timeout: SNIFF_TIMEOUT_MS,
         maxRedirects: 5,
-        maxContentLength: 0, // don't download body
+        responseType: "text",
+        signal: AbortSignal.timeout(SNIFF_TIMEOUT_MS),
       });
     }
     const ct = (res.headers["content-type"] as string ?? "").toLowerCase().split(";")[0].trim();

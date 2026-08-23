@@ -6,23 +6,39 @@ import { pageCache } from "./cache.js";
 /**
  * Strips terminal-style layout whitespace from Browsh plain text output.
  *
- * Removes leading/trailing blank (whitespace-only) lines, collapses runs
- * of consecutive blank lines to a single newline, and trims trailing spaces
- * from each line. Content indentation (e.g. code blocks, indented paragraphs)
- * is preserved — only truly blank lines are stripped.
+ * 1. Removes leading/trailing blank (whitespace-only) lines.
+ * 2. Collapses runs of consecutive blank lines to a single newline.
+ * 3. Detects the minimum indentation across all content lines and strips
+ *    that consistent prefix, removing Browsh's terminal padding while
+ *    preserving relative indentation (e.g. code blocks, nested lists).
+ * 4. Trims trailing spaces from each line.
  */
 function cleanPlainText(text: string): string {
-  return text
-    // Strip leading whitespace-only lines (Browsh terminal padding)
+  // Step 1–2: remove blank lines and collapse runs
+  const cleaned = text
     .replace(/^(\s*\n)+/, "")
-    // Strip trailing whitespace-only lines
     .replace(/(\n\s*)+$/, "")
-    // Collapse runs of 2+ blank lines to a single newline
-    .replace(/\n{2,}/g, "\n")
-    // Trim trailing spaces from each line (preserves leading indentation)
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .join("\n");
+    .replace(/\n{2,}/g, "\n");
+
+  const lines = cleaned.split("\n").map((l) => l.trimEnd());
+
+  // Step 3: find minimum leading spaces across non-empty lines
+  let minIndent = Infinity;
+  for (const line of lines) {
+    if (line.trim() === "") continue;
+    const match = line.match(/^(\s*)/);
+    if (match && match[1].length < minIndent) {
+      minIndent = match[1].length;
+    }
+  }
+
+  // Step 4: strip the common prefix and trim trailing spaces
+  if (minIndent > 0 && minIndent < Infinity) {
+    return lines
+      .map((line) => (line.trim() === "" ? "" : line.slice(minIndent)))
+      .join("\n");
+  }
+  return lines.join("\n");
 }
 
 /**
