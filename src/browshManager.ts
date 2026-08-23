@@ -4,6 +4,28 @@ import { FetchError } from "./errors.js";
 import { pageCache } from "./cache.js";
 
 /**
+ * Strips terminal-style layout whitespace from Browsh plain text output.
+ *
+ * Removes leading/trailing blank (whitespace-only) lines, collapses runs
+ * of consecutive blank lines to a single newline, and trims trailing spaces
+ * from each line. Content indentation (e.g. code blocks, indented paragraphs)
+ * is preserved — only truly blank lines are stripped.
+ */
+function cleanPlainText(text: string): string {
+  return text
+    // Strip leading whitespace-only lines (Browsh terminal padding)
+    .replace(/^(\s*\n)+/, "")
+    // Strip trailing whitespace-only lines
+    .replace(/(\n\s*)+$/, "")
+    // Collapse runs of 2+ blank lines to a single newline
+    .replace(/\n{2,}/g, "\n")
+    // Trim trailing spaces from each line (preserves leading indentation)
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n");
+}
+
+/**
  * Manages the single Browsh instance lifecycle: lazy start, health probing,
  * request serialization (mutex), request-count-based recycling, and idle kill.
  *
@@ -298,7 +320,8 @@ class BrowshManager {
 
   /** Fetches JS-rendered plain text. */
   async fetchPlain(url: string, signal?: AbortSignal): Promise<string> {
-    return this.fetchRaw(url, "PLAIN", signal);
+    const raw = await this.fetchRaw(url, "PLAIN", signal);
+    return cleanPlainText(raw);
   }
 
   /** Fetches JS-rendered HTML (DOM). */

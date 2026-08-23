@@ -16,15 +16,51 @@ export interface SearchResult {
 /** Total wall-clock budget for the enrichment phase (ms). */
 const ENRICH_BUDGET_MS = 45_000;
 
-function decodeDdgRedirect(href?: string): string | undefined {
-  if (!href || !href.includes("duckduckgo.com/l/")) return href;
-  try {
-    const u = new URL(href.startsWith("//") ? `https:${href}` : href);
-    const target = u.searchParams.get("uddg");
-    return target && /^https?:\/\//i.test(target) ? target : href;
-  } catch {
+/**
+ * Decodes search-engine redirect wrappers to extract the real destination URL.
+ * Handles: DuckDuckGo (`uddg` param), Bing (`u` base64 param), Google (`/url?q=`).
+ * Returns the original href if no known pattern matches or decoding fails.
+ */
+function decodeRedirect(href?: string): string | undefined {
+  if (!href) return href;
+
+  // DuckDuckGo: https://duckduckgo.com/l/?uddg=<encoded-url>
+  if (href.includes("duckduckgo.com/l/")) {
+    try {
+      const u = new URL(href.startsWith("//") ? `https:${href}` : href);
+      const target = u.searchParams.get("uddg");
+      if (target && /^https?:\/\//i.test(target)) return target;
+    } catch { /* fall through */ }
     return href;
   }
+
+  // Bing: https://www.bing.com/ck/a?...&u=<base64url>...
+  if (href.includes("bing.com/ck/a")) {
+    try {
+      const u = new URL(href);
+      const encoded = u.searchParams.get("u");
+      if (encoded) {
+        // Bing uses URL-safe base64 (no padding, - instead of +, _ instead of /)
+        const std = encoded.replace(/-/g, "+").replace(/_/g, "/");
+        const padded = std + "=".repeat((4 - (std.length % 4)) % 4);
+        const decoded = Buffer.from(padded, "base64").toString("utf-8");
+        if (/^https?:\/\//i.test(decoded)) return decoded;
+      }
+    } catch { /* fall through */ }
+    return href;
+  }
+
+  // Google: https://www.google.com/url?q=<encoded-url>&...
+  if (href.includes("google.com/url")) {
+    try {
+      const u = new URL(href);
+      const target = u.searchParams.get("q");
+      if (target && /^https?:\/\//i.test(target)) return target;
+    } catch { /* fall through */ }
+    return href;
+  }
+
+  return href;
 }
 
 function absolute(href: string | undefined, base: string): string | null {
@@ -55,7 +91,7 @@ function parseDuckDuckGo(html: string, baseUrl: string): SearchResult[] {
   $(".result").each((_, el) => {
     const link = $(el).find(".result__a").first();
     const snippet = $(el).find(".result__snippet").first().text().trim();
-    const href = decodeDdgRedirect(link.attr("href"));
+    const href = decodeRedirect(link.attr("href"));
     const abs = absolute(href, baseUrl);
     if (!abs) return;
     results.push({ title: link.text().trim() || abs, url: abs, snippet, fetched_at: 0 });
@@ -70,7 +106,9 @@ function parseBing(html: string, baseUrl: string): SearchResult[] {
   $("li.b_algo").each((_, el) => {
     const a = $(el).find("h2 a").first();
     const snippet = $(el).find(".b_caption p, p").first().text().trim();
-    const abs = absolute(a.attr("href"), baseUrl);
+    const raw = a.attr("href");
+    const decoded = decodeRedirect(raw);
+    const abs = absolute(decoded, baseUrl);
     if (!abs) return;
     results.push({ title: a.text().trim() || abs, url: abs, snippet, fetched_at: 0 });
   });

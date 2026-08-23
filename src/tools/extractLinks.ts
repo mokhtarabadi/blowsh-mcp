@@ -39,6 +39,17 @@ export async function extractLinks(url: string, limit = 50): Promise<Link[]> {
   const dom = await browshManager.fetchDom(url);
   const $ = load(dom);
 
+  // Strip noise elements (nav, header, footer, aside, scripts, styles) so
+  // content links get priority over navigation chrome.
+  const NOISE_SELECTORS = [
+    "nav", "header", "footer", "aside",
+    "script", "style", "noscript", "template",
+    "[role='navigation']", "[role='banner']", "[role='contentinfo']",
+  ];
+  for (const sel of NOISE_SELECTORS) {
+    try { $(sel).remove(); } catch { /* skip invalid selectors */ }
+  }
+
   const links: Link[] = [];
   const seen = new Set<string>();
   $("a[href]").each((_, el) => {
