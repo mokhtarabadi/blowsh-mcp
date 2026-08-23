@@ -58,7 +58,5 @@ Release v2.2.1 containing all verified bug fixes and improvements from Task 04 a
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-
-_(Git diff will be automatically injected here by the MCP tool. Do not edit this block manually)_
-
+**Factual Git Diff:** Stored in Commit Hash: `200bb81495e97df40cdcc0185bbffc9ce56da5ca`
 <!-- END_GIT_DIFF -->
