@@ -16,6 +16,22 @@ export interface SearchResult {
 /** Total wall-clock budget for the enrichment phase (ms). */
 const ENRICH_BUDGET_MS = 45_000;
 
+// Simple in-memory query cache (intent-aware)
+const queryCache = new Map<string, { at: number; results: SearchResult[] }>();
+
+function cacheKeyForQuery(q: string, intent: string): string {
+  return `${intent}|${q.toLowerCase().replace(/\s+/g, " ").trim()}`;
+}
+
+function intentCacheTtl(intent: string, query: string): number {
+  const recency = ["latest", "today", "breaking", "recent", "price", "stock", "weather", "2026", "2025"];
+  const lc = query.toLowerCase();
+  if (recency.some((s) => lc.includes(s))) return 300_000;
+  if (intent === "news") return 300_000;
+  if (intent === "code") return 900_000;
+  return 1_800_000;
+}
+
 /**
  * Decodes search-engine redirect wrappers to extract the real destination URL.
  * Handles: DuckDuckGo (`uddg` param), Bing (`u` base64 param), Google (`/url?q=`).
@@ -87,6 +103,18 @@ function bingSearchUrl(query: string, page: number): string {
   return `https://www.bing.com/search?q=${encodeURIComponent(query)}&first=${first}&count=10`;
 }
 
+/** Brave search URL (10 results per page, offset param). */
+function braveSearchUrl(query: string, page: number): string {
+  const offset = (page - 1) * 10;
+  return `https://search.brave.com/search?q=${encodeURIComponent(query)}&offset=${offset}`;
+}
+
+/** Mojeek search URL */
+function mojeekSearchUrl(query: string, page: number): string {
+  const s = (page - 1) * 10 + 1;
+  return `https://www.mojeek.com/search?q=${encodeURIComponent(query)}&s=${s}`;
+}
+
 /** Parses DuckDuckGo HTML (html.duckduckgo.com) results. */
 function parseDuckDuckGo(html: string, baseUrl: string): SearchResult[] {
   const $ = load(html);
@@ -117,6 +145,195 @@ function parseBing(html: string, baseUrl: string): SearchResult[] {
   });
   return results;
 }
+
+/** Parses Brave search results (best-effort, multiple selectors). */
+function parseBrave(html: string, baseUrl: string): SearchResult[] {
+  const $ = load(html);
+  const results: SearchResult[] = [];
+  // Brave uses varied selectors across layouts — try several
+  const containers = $(".snippet, .result, [data-type='web'], .card, #results .result");
+  if (containers.length > 0) {
+    containers.each((_, el) => {
+      const a = $(el).find("a").first();
+      // Brave may have title in .snippet-title or .result-header
+      const title = $(el).find(".snippet-title, .result-header, a").first().text().trim() || a.text().trim();
+      const snippet = $(el).find(".snippet-content, .snippet-description, p").first().text().trim();
+      const href = a.attr("href");
+      const abs = absolute(href, baseUrl);
+      if (!abs || !title) return;
+      // filter out brave internal
+      if (abs.includes("search.brave.com")) return;
+      results.push({ title, url: abs, snippet, fetched_at: 0 });
+    });
+  }
+  // fallback generic: any h2/a with snippet-like text
+  if (results.length === 0) {
+    $("a[href^='http']").each((_, el) => {
+      const href = $(el).attr("href");
+      const abs = absolute(href, baseUrl);
+      if (!abs || abs.includes("brave.com")) return;
+      const title = $(el).text().trim();
+      if (title.length < 8 || title.length > 200) return;
+      const snippet = $(el).parent().find("p").first().text().trim().slice(0, 300);
+      if (results.length < 10) results.push({ title, url: abs, snippet, fetched_at: 0 });
+    });
+  }
+  return results.slice(0, 10);
+}
+
+/** Parses Mojeek results. */
+function parseMojeek(html: string, baseUrl: string): SearchResult[] {
+  const $ = load(html);
+  const results: SearchResult[] = [];
+  $("ul.results-standard li, .ob, li.obs").each((_, el) => {
+    const a = $(el).find("a.obTitle, a.title, h2 a, a").first();
+    const title = a.text().trim();
+    const snippet = $(el).find("p.s, p.description, .s").first().text().trim();
+    const href = a.attr("href");
+    const abs = absolute(href, baseUrl);
+    if (!abs || !title) return;
+    if (abs.includes("mojeek.com")) return;
+    results.push({ title, url: abs, snippet, fetched_at: 0 });
+  });
+  // fallback
+  if (results.length === 0) {
+    $("a[href^='http']").each((_, el) => {
+      const href = $(el).attr("href");
+      const abs = absolute(href, baseUrl);
+      if (!abs || abs.includes("mojeek.com")) return;
+      const title = $(el).text().trim();
+      if (title.length < 8 || title.length > 200) return;
+      const snippet = $(el).parent().text().trim().slice(0, 200);
+      if (results.length < 10) results.push({ title, url: abs, snippet, fetched_at: 0 });
+    });
+  }
+  return results.slice(0, 10);
+}
+
+// ---------------------------------------------------------------------------
+// Verticals (intent-specific, keyless)
+// ---------------------------------------------------------------------------
+
+async function fetchWikipediaResults(query: string): Promise<SearchResult[]> {
+  try {
+    await assertSafeUrl("https://en.wikipedia.org/");
+    const res = await axios.get("https://en.wikipedia.org/w/api.php", {
+      params: { action: "opensearch", search: query, limit: 5, namespace: 0, format: "json" },
+      timeout: 5000,
+    });
+    const data = res.data as [string, string[], string[], string[]];
+    const titles: string[] = data[1] ?? [];
+    const snippets: string[] = data[2] ?? [];
+    const urls: string[] = data[3] ?? [];
+    const out: SearchResult[] = [];
+    for (let i = 0; i < titles.length; i++) {
+      if (urls[i]) out.push({ title: titles[i] || urls[i], url: urls[i], snippet: snippets[i] ?? "", fetched_at: 0 });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+async function fetchGithubResults(query: string): Promise<SearchResult[]> {
+  try {
+    await assertSafeUrl("https://github.com/");
+    // Use HTML search (no API key) — parse repository links
+    const url = `https://github.com/search?q=${encodeURIComponent(query)}&type=repositories`;
+    await assertSafeUrl(url);
+    const res = await axios.get(url, {
+      timeout: 6000,
+      headers: { "User-Agent": "blowsh-mcp/2.3.0", Accept: "text/html" },
+      maxRedirects: 3,
+    });
+    const $ = load(String(res.data));
+    const out: SearchResult[] = [];
+    $("a[href*='/'][data-hydro-click]").each((_, el) => {
+      const href = $(el).attr("href");
+      if (!href || !/^\/[^/]+\/[^/]+$/.test(href)) return;
+      const abs = `https://github.com${href}`;
+      const title = $(el).text().trim() || href.slice(1);
+      if (out.length < 5) out.push({ title, url: abs, snippet: "GitHub repository", fetched_at: 0 });
+    });
+    // fallback generic links to github repos
+    if (out.length === 0) {
+      $("a[href^='https://github.com/']").each((_, el) => {
+        const href = $(el).attr("href") ?? "";
+        if (out.length >= 3) return;
+        if (/^https:\/\/github\.com\/[^/]+\/[^/]+\/?$/.test(href)) {
+          const title = $(el).text().trim() || href;
+          if (title) out.push({ title: title.slice(0, 80), url: href, snippet: "", fetched_at: 0 });
+        }
+      });
+    }
+    return out.slice(0, 5);
+  } catch {
+    return [];
+  }
+}
+
+async function fetchArxivResults(query: string): Promise<SearchResult[]> {
+  try {
+    await assertSafeUrl("http://export.arxiv.org/");
+    const res = await axios.get("http://export.arxiv.org/api/query", {
+      params: { search_query: `all:${query}`, start: 0, max_results: 5 },
+      timeout: 6000,
+      responseType: "text",
+    });
+    const xml = String(res.data);
+    const $ = load(xml, { xmlMode: true });
+    const out: SearchResult[] = [];
+    $("entry").each((_, el) => {
+      const title = $(el).find("title").first().text().trim().replace(/\s+/g, " ");
+      const url = $(el).find("id").first().text().trim();
+      const summary = $(el).find("summary").first().text().trim().replace(/\s+/g, " ").slice(0, 300);
+      if (title && url) out.push({ title, url, snippet: summary, fetched_at: 0 });
+    });
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+async function fetchHnResults(query: string): Promise<SearchResult[]> {
+  try {
+    await assertSafeUrl("https://hn.algolia.com/");
+    const res = await axios.get("https://hn.algolia.com/api/v1/search", {
+      params: { query, hitsPerPage: 5, tags: "story" },
+      timeout: 5000,
+    });
+    const data = res.data as { hits?: Array<{ title?: string; url?: string; objectID: string; points?: number }> };
+    const out: SearchResult[] = [];
+    for (const hit of data.hits ?? []) {
+      const url = hit.url ?? `https://news.ycombinator.com/item?id=${hit.objectID}`;
+      const title = hit.title ?? url;
+      out.push({ title, url, snippet: `HN ${hit.points ?? 0} points`, fetched_at: 0 });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Intent
+// ---------------------------------------------------------------------------
+
+export type SearchIntent = "auto" | "web" | "code" | "paper" | "news" | "entity";
+
+function detectIntent(query: string, forced?: string): SearchIntent {
+  if (forced && forced !== "auto") return forced as SearchIntent;
+  const q = query.toLowerCase();
+  if (q.includes("arxiv") || q.includes("paper") || q.includes("research") || q.includes("citation")) return "paper";
+  if (q.includes("github") || q.includes("npm") || q.includes("pypi") || q.includes("code") || q.includes("function") || q.includes("error") || q.includes("stack overflow")) return "code";
+  if (q.includes("news") || q.includes("breaking") || q.includes("today") || q.includes("latest")) return "news";
+  if (/^(who is|what is|where is|definition of)/i.test(q.trim())) return "entity";
+  return "web";
+}
+
+// ---------------------------------------------------------------------------
+// DuckDuckGo Instant Answer
+// ---------------------------------------------------------------------------
 
 /**
  * Fetches the DuckDuckGo Instant Answer ("zero-click") abstract for a query.
@@ -169,105 +386,208 @@ async function renderEngine(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Merging — consensus + dedup
+// ---------------------------------------------------------------------------
+
+function mergeResults(sets: SearchResult[][]): SearchResult[] {
+  const byUrl = new Map<string, { result: SearchResult; count: number; firstIdx: number }>();
+  let idx = 0;
+  for (const set of sets) {
+    for (const r of set) {
+      const key = r.url.replace(/\/$/, "");
+      const existing = byUrl.get(key);
+      if (existing) {
+        existing.count++;
+        // keep richest snippet
+        if (r.snippet.length > existing.result.snippet.length) existing.result.snippet = r.snippet;
+      } else {
+        byUrl.set(key, { result: { ...r }, count: 1, firstIdx: idx++ });
+      }
+    }
+  }
+  const merged = Array.from(byUrl.values()).sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    return a.firstIdx - b.firstIdx;
+  }).map((v) => v.result);
+  return merged;
+}
+
+// ---------------------------------------------------------------------------
+// Single-query search (engines + verticals + merge)
+// ---------------------------------------------------------------------------
+
+async function searchSingleQuery(
+  query: string,
+  maxResults: number,
+  page: number,
+  enrich: boolean,
+  intent: SearchIntent,
+  deadlineMs?: number
+): Promise<SearchResult[]> {
+  const cacheKey = cacheKeyForQuery(query, intent);
+  const cached = queryCache.get(cacheKey);
+  const ttl = intentCacheTtl(intent, query);
+  if (cached && Date.now() - cached.at < ttl) {
+    return cached.results.slice(0, maxResults);
+  }
+
+  const engines: Array<{ url: string; parse: (html: string) => SearchResult[] }> = [
+    { url: ddgSearchUrl(query, page), parse: (html) => parseDuckDuckGo(html, "https://duckduckgo.com/") },
+    { url: bingSearchUrl(query, page), parse: (html) => parseBing(html, "https://www.bing.com/") },
+    { url: braveSearchUrl(query, page), parse: (html) => parseBrave(html, "https://search.brave.com/") },
+    { url: mojeekSearchUrl(query, page), parse: (html) => parseMojeek(html, "https://www.mojeek.com/") },
+  ];
+
+  // Verticals per intent (direct axios, no Browsh — friendly APIs)
+  const verticalPromises: Promise<SearchResult[]>[] = [];
+  if (intent === "code") verticalPromises.push(fetchGithubResults(query));
+  else if (intent === "paper") verticalPromises.push(fetchArxivResults(query));
+  else if (intent === "news") verticalPromises.push(fetchHnResults(query));
+  else if (intent === "entity") verticalPromises.push(fetchWikipediaResults(query));
+  // auto may still add entity if query looks factual — but keep simple: only forced intent triggers verticals for now
+
+  const controller = new AbortController();
+  const deadlineTimer = deadlineMs ? setTimeout(() => controller.abort(), deadlineMs) : null;
+
+  try {
+    const [instantAnswer, engineOutcomes, verticalResults] = await Promise.all([
+      fetchInstantAnswer(query),
+      Promise.allSettled(
+        engines.map(async (engine) => {
+          const results = await renderEngine(engine, controller.signal);
+          return results;
+        })
+      ),
+      Promise.all(verticalPromises).then((arr) => arr.flat()).catch(() => [] as SearchResult[]),
+    ]);
+
+    const engineResults: SearchResult[][] = [];
+    let anyFulfilled = false;
+    for (const o of engineOutcomes) {
+      if (o.status === "fulfilled") {
+        anyFulfilled = true;
+        if (o.value.length > 0) engineResults.push(o.value);
+      }
+    }
+    if (verticalResults.length > 0) engineResults.push(verticalResults);
+
+    if (engineResults.length === 0 && !anyFulfilled) {
+      const reason = engineOutcomes.map((o) => o.status === "rejected" ? o.reason : null).find((r) => r !== null);
+      if (reason instanceof Error) throw reason;
+      throw new FetchError(`No results found for query: ${query}`);
+    }
+
+    let merged = mergeResults(engineResults);
+
+    // Enrichment: replace the top-3 organic snippets with fetched main-content
+    // markdown. Best-effort, sequential, and hard-bounded by a wall-clock budget
+    if (enrich && merged.length > 0) {
+      const deadline = Date.now() + ENRICH_BUDGET_MS;
+      for (const result of merged.slice(0, 3)) {
+        if (Date.now() > deadline) break;
+        if (controller.signal.aborted) break;
+        try {
+          const markdown = await fetchWeb({ url: result.url, type: "markdown", max_chars: 1500 });
+          result.snippet = markdown.trim();
+        } catch (e) {
+          console.error(`[searchWeb] Enrichment failed for ${result.url}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+
+    const now = Date.now();
+    const results: SearchResult[] = [];
+    if (instantAnswer) {
+      results.push({ title: "Instant Answer", url: "", snippet: instantAnswer, fetched_at: now });
+    }
+    for (const r of merged) results.push({ ...r, fetched_at: now });
+
+    const sliced = results.slice(0, maxResults);
+    // cache only organic merged (without instant answer timestamp drift)
+    queryCache.set(cacheKey, { at: Date.now(), results: sliced });
+    // cap cache size
+    if (queryCache.size > 100) {
+      const firstKey = queryCache.keys().next().value;
+      if (firstKey) queryCache.delete(firstKey);
+    }
+    return sliced;
+  } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry — now with query_variants, intent, deadline_ms
+// ---------------------------------------------------------------------------
+
 /**
  * Searches the web through rendered search engines and returns ranked results.
- * DuckDuckGo HTML and Bing are rendered CONCURRENTLY (single shared browser,
- * mutex-serialized); the first engine to return results aborts the other, so
- * worst-case latency is bounded by the slowest single engine, not their sum.
- * DDG's Instant Answer API is probed in parallel and its abstract is prepended
- * as a synthetic result when available.
- *
- * @param query The search query.
- * @param maxResults Max results to return (1-30), including the synthetic IA.
- * @param page Result page (1-10). Engine offsets are synthesized per engine.
- * @param enrich When true, the top 3 organic results' snippets are replaced
- *   with fetched main-content markdown (≤1500 chars each) — best-effort,
- *   bounded by a 45 s wall-clock budget.
- *
- * Every result carries `fetched_at` (UTC epoch ms) so consumers can gauge
- * staleness. An empty organic result set is terminal success → `[]`; errors
- * are only propagated when NO engine completed at all.
+ * Engines (DDG, Bing, Brave, Mojeek) are rendered concurrently; results are
+ * merged by consensus (cross-engine agreement) + dedup, rather than winner-takes-all.
+ * Intent verticals (github, wikipedia, arxiv, hn) are added when intent dictates.
+ * Query variants run in parallel and are merged.
  */
 export async function searchWeb(
   query: string,
   maxResults = 10,
   page = 1,
-  enrich = false
+  enrich = false,
+  queryVariants?: string[],
+  intent?: string,
+  deadlineMs?: number
 ): Promise<SearchResult[]> {
   if (!query.trim()) throw new FetchError("Query must be a non-empty string");
   const max = Math.max(1, Math.min(30, maxResults));
   const currentPage = Math.max(1, Math.min(10, page));
+  const resolvedIntent = detectIntent(query, intent);
 
-  const engines = [
-    {
-      url: ddgSearchUrl(query, currentPage),
-      parse: (html: string) => parseDuckDuckGo(html, "https://duckduckgo.com/"),
-    },
-    {
-      url: bingSearchUrl(query, currentPage),
-      parse: (html: string) => parseBing(html, "https://www.bing.com/"),
-    },
-  ];
+  // Deadline wrapper for the whole operation (honest deadline error, never hang)
+  const run = async (): Promise<SearchResult[]> => {
+    // Handle query variants: base + up to 2 variants in parallel, merged
+    const variants = (queryVariants ?? []).slice(0, 2).map((v) => v.trim()).filter(Boolean);
+    const queries = [query, ...variants];
 
-  // Fire the instant-answer probe and both engine renders in parallel.
-  const controller = new AbortController();
-  let winner: SearchResult[] | null = null;
+    if (queries.length === 1) {
+      return searchSingleQuery(query, max, currentPage, enrich, resolvedIntent, deadlineMs);
+    }
 
-  const [instantAnswer, engineOutcomes] = await Promise.all([
-    fetchInstantAnswer(query),
-    Promise.allSettled(
-      engines.map(async (engine) => {
-        const results = await renderEngine(engine, controller.signal);
-        if (winner === null && results.length > 0) {
-          winner = results;
-          controller.abort(); // the other engine's render is no longer needed
-        }
-        return results;
-      })
-    ),
-  ]);
+    // Variants: search each query in parallel, then merge per-query result sets with dedup across variants
+    // For separated sets, we merge but preserve variant provenance in snippet? We merge flat for backward compat.
+    const perQueryResults = await Promise.all(
+      queries.map((q) => searchSingleQuery(q, max, currentPage, false, resolvedIntent, deadlineMs).catch(() => [] as SearchResult[]))
+    );
 
-  const completedEngines = engineOutcomes.filter((o) => o.status === "fulfilled").length;
-  // Explicit annotation: TS cannot track closure assignments to `winner`, so
-  // an uninferred `?? []` would narrow to never[] and break downstream access.
-  const organic: SearchResult[] = winner ?? [];
+    // Merge across variants: dedup by URL, keep highest consensus
+    const flatMerged = mergeResults(perQueryResults);
 
-  if (organic.length === 0 && completedEngines === 0) {
-    // No engine even completed — surface the underlying failure instead of a
-    // misleading empty result set. (If any engine completed cleanly with zero
-    // results, that's terminal success `[]`.)
-    const reason = engineOutcomes
-      .map((o) => (o.status === "rejected" ? o.reason : null))
-      .find((r) => r !== null);
-    if (reason instanceof Error) throw reason;
-    throw new FetchError(`No results found for query: ${query}`);
-  }
-
-  // Enrichment: replace the top-3 organic snippets with fetched main-content
-  // markdown. Best-effort, sequential, and hard-bounded by a wall-clock budget
-  // so enrichment can never push a search past the client's request timeout.
-  if (enrich && organic.length > 0) {
-    const deadline = Date.now() + ENRICH_BUDGET_MS;
-    for (const result of organic.slice(0, 3)) {
-      if (Date.now() > deadline) break;
-      try {
-        const markdown = await fetchWeb({ url: result.url, type: "markdown", max_chars: 1500 });
-        result.snippet = markdown.trim();
-      } catch (e) {
-        console.error(
-          `[searchWeb] Enrichment failed for ${result.url}: ${
-            e instanceof Error ? e.message : String(e)
-          }`
-        );
+    // Enrich after merge if requested (once)
+    if (enrich && flatMerged.length > 0) {
+      const deadline = Date.now() + ENRICH_BUDGET_MS;
+      for (const result of flatMerged.slice(0, 3)) {
+        if (Date.now() > deadline) break;
+        try {
+          const markdown = await fetchWeb({ url: result.url, type: "markdown", max_chars: 1500 });
+          result.snippet = markdown.trim();
+        } catch { /* ignore */ }
       }
     }
+
+    const now = Date.now();
+    for (const r of flatMerged) r.fetched_at = now;
+    return flatMerged.slice(0, max);
+  };
+
+  if (deadlineMs && deadlineMs > 0) {
+    const timeoutMs = Math.max(500, Math.min(600_000, deadlineMs));
+    const deadlineError = new FetchError(`deadline.hit: search timed out after ${timeoutMs}ms (query: ${query})`, {});
+    // Attach stable code for branching
+    (deadlineError as unknown as { code?: string }).code = "deadline.hit";
+    return Promise.race([
+      run(),
+      new Promise<SearchResult[]>((_, reject) => setTimeout(() => reject(deadlineError), timeoutMs)),
+    ]);
   }
 
-  const now = Date.now();
-  const results: SearchResult[] = [];
-  if (instantAnswer) {
-    results.push({ title: "Instant Answer", url: "", snippet: instantAnswer, fetched_at: now });
-  }
-  for (const r of organic) results.push({ ...r, fetched_at: now });
-  return results.slice(0, max);
+  return run();
 }

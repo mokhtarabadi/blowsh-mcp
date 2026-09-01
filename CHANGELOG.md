@@ -1,5 +1,54 @@
 # Changelog
 
+## [2.3.1] - 2026-09-01
+
+### Added
+- `fetch_web`: **deadline_ms** (hard budget 500-600000ms → `FetchError: deadline.hit: fetch timed out ...` with stable code `"deadline.hit"`; Promise.race inside `fetchWeb()`).
+- `fetch_web`: **tier** (`auto|1|2` — `auto` HTTP first → browser escalate (default), `1` HTTP-only direct axios, `2` browser-direct skip sniff; handled in `renderOnce()` via `tierMode`).
+- `fetch_web`: **links** (`links=false` strips `[text](url)` → `text` via `stripLinks()` — saves ~30%; default true for backward compat) and **media** (`media=false` strips `![alt](url)` and `<img>` via `stripMedia()`).
+- `fetch_web`: **since_last** (`since_last=true` fingerprint check via `blowsh-fetch-fingerprints.json` — unchanged → `unchanged since last fetch (fingerprint age)` one-liner ~30 tokens; changed → `> [changed since last fetch — …]` banner; SHA256 hash, 200-entry prune).
+- `fetch_web`: **offset** (`offset=N` skips N chars before `max_chars` truncation via `applyOffset()` — parity with DonSeTch `next_offset` resume; `settleKey` now includes `off:N` + `dl:N`).
+- `src/extract.ts`: added `stripLinks()`, `stripMedia()`, `applyOffset()` helpers (shared by fetch and crawl).
+
+### Changed
+- Bumped version to 2.3.1 (`package.json` + `server.ts` MCP version + `docs/architecture.md` + `docs/data_model.md`).
+- `docs/data_model.md`: extended fetch_web input table with 6 new rows (deadline_ms, tier, links, media, since_last, offset) and output descriptions (deadline.hit, tier modes, links/media stripping, since_last banner, offset).
+- `DESIGN.md`: updated token-economy principle (links/media), output rules (links/media/since_last/offset), error codes (fetch deadline.hit), naming (tier enum), golden path (links/since_last example).
+- `README.md`: Tool API fetch_web row now lists 16 params (up to offset).
+
+### Fixed
+- `src/tools/crawlWeb.ts`: hardened crawler SSRF guard — every dequeued `item.url` is now validated via `assertSafeUrl` before `fetchDom`; on failure records `skipped: {url, reason: "ssrf: ..."}` and `continue`. Frontier expansion also validates each `abs` via `assertSafeUrl` before `pushQueue`, silently skipping private/loopback targets.
+- `src/tools/fetchWeb.ts`: fixed `since_last` & `offset` cache pipeline — removed `o.offset` from `settleKey()` (no `off:N` bifurcation), ensured `pageCache.set(key, rawRendered)` saves clean rendered content BEFORE `applyOffset`/`handleSinceLast`/link/media stripping; those transforms now happen strictly on the read path after cache retrieval (both hits and fresh renders). Prevents duplicate `> [changed …]` banners and enables `offset` reuse on hits.
+- `tests/qa-boundary-tests.ts`: expanded to V3 suites — `V3a` verifies `applyOffset` on cache hits without key bifurcation (`settleKey` no `off:`), `V3b` verifies `since_last` repeated fetch returns stable one-liner without duplicate banners (and changed banner on actual change), `V3c` verifies `crawlWeb` SSRF private IP rejection via `isPrivateAddress` (127.0.0.1, 10/8, 192.168/16, 172.16/12, 169.254/16).
+
+### Notes
+- Remaining DonSeTch gaps deferred: `budget_tokens`, `image_text` (OCR), `actions`/`shot` (browser control), reference handles (L/S) — require Ghost browser / OCR runtime not present in blowsh image. Documented in `tasks/qa/06-` and `docs/architecture.md` roadmap.
+
+## [2.3.0] - 2026-09-01
+
+### Added
+- `fetch_web`: **focus** (BM25-lite relevance filter — keeps only blocks scoring against query, header `> Focus filter ...`, falls back with `[focus: no blocks matched ...]`; 50-80% token reduction) — DonSeTch parity.
+- `fetch_web`: **toc** (heading outline only, `extractToc()`) and **section** (single section by heading substring, `extractSectionHtml()`) — two cheap calls replace one expensive full-page fetch.
+- `fetch_web`: **must_contain** probe mode (MATCH/NO-MATCH + ≤3 excerpts, `probeMustContain()`; substring or `/regex/` case-insensitive, ~60 tokens vs 4k) — verification without context bloat.
+- `fetch_web`: **archive** resurrection (`archive="auto"` on hard failure serves Wayback `archive.org/wayback/available` snapshot labeled `> [archive snapshot from YYYY-MM-DD ...]`; `archive="only"` goes straight to Wayback; `archive.stale` error when none).
+- `fetch_web`: **stitch** (`stitch=true` follows `rel=next` up to 6 parts / 48k chars, `findNextUrl()` + `fetchStitchedMarkdown()`, same-host only, `*(part N)*` markers).
+- `search_web`: **query_variants** (max 2 alternate formulations, searched in parallel via `searchSingleQuery()` per variant, merged with dedup).
+- `search_web`: **intent** (`auto|web|code|paper|news|entity`, `detectIntent()` — code→GitHub, paper→arXiv, news→HN Algolia, entity→Wikipedia opensearch, fetched via direct axios verticals).
+- `search_web`: **deadline_ms** (hard budget 500-600000ms, races whole search → `FetchError: deadline.hit: search timed out ...` with stable code).
+- `search_web`: expanded to **4 rendered engines** (DDG + Bing + Brave + Mojeek) fused by **consensus** (`mergeResults()` — cross-engine agreement sorting, not winner-takes-all) plus query cache (`queryCache`, intent-aware TTL 300s-1800s).
+- **New tool `crawl_web`**: sitemap-aware crawl (`discoverSitemaps()` + `parseSitemapXml()`), frontier best-first (`scoreCandidate()` BM25-lite), Governor pacing (dwell variance + crawl-delay + exponential backoff on 429), globs (`scopeAllowed`/`effectiveExcludes`), `robots.txt` (`fetchRobots`/`isAllowed`), budgets (`max_pages`/`max_total_chars`/`deadline_s`/`max_depth`), disk-backed **resume tokens** (`blowsh-crawl-resumes.json`, 30 min TTL, atomic rename) and **since_last** delta (`blowsh-crawl-fingerprints.json`, <24h), `qualityScore`/`contentKind`, stop reasons (`FrontierEmpty|MaxPages|CharBudget|DepthLimit|Deadline|ThrottledOut`), `crawl_delay` surfacing.
+- `src/extract.ts`: added helpers `focusFilter`, `extractToc`, `extractSectionHtml`, `probeMustContain`, `findNextUrl` (shared by fetch and crawl).
+
+### Changed
+- Bumped version to 2.3.0 (`package.json` + `server.ts` MCP version).
+- `docs/data_model.md`: full input/output specs for fetch_web new params and crawl_web (5 tools total).
+- `docs/architecture.md`: project structure + system diagram + component sections updated for 5 tools, new helpers, and crawl persistence files.
+- `DESIGN.md`: token-economy principle extended (focus/toc/must_contain), output rules (focus/archive/stitch/probe/toc shapes), error codes (archive.stale, deadline.hit, Section not found, resume expired), naming (crawl_web), golden paths.
+- `README.md`: Key Features, How it Works, Example Usage (focus/probe/crawl), Project Structure, Tool API (fetch_web/search_web/crawl_web), AI-Guided Selection updated for v2.3.0.
+
+### Gap vs DonSeTch (remaining, deferred to v2.4)
+- Reference handles (L/S), progressToken streaming, full page-memory diff, domain adapters (Reddit/npm/PyPI/crates), browser actions (click/type/press), temporal stealth/TLS — documented in `docs/architecture.md` roadmap and task backlog.
+
 ## [2.2.1] - 2026-08-23
 
 ### Fixed
