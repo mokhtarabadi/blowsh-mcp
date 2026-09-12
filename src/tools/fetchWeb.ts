@@ -137,7 +137,7 @@ async function fetchWaybackSnapshot(originalUrl: string): Promise<WaybackSnapsho
       maxRedirects: 5,
       responseType: "text",
       maxContentLength: 5 * 1024 * 1024,
-      headers: { "User-Agent": "blowsh-mcp/2.3.0" },
+      headers: { "User-Agent": "blowsh-mcp/2.3.2" },
     });
     if (snapRes.status >= 400) return null;
     const html = String(snapRes.data);

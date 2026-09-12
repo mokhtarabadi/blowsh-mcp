@@ -169,25 +169,151 @@ export function extractToc(html: string): string {
   const lines: string[] = ["# Table of Contents", ""];
   let count = 0;
   $("h1, h2, h3, h4, h5, h6").each((_, el) => {
-    const tag = (el as unknown as { name?: string }).name ?? el.tagName?.toLowerCase() ?? "h2";
-    const level = Number(tag.replace("h", "")) || 2;
-    const text = $(el).text().trim().replace(/\s+/g, " ");
+    const level = headingLevel(tagNameOf(el)) || 2;
+    const text = cleanHeadingText($, el);
     if (!text) return;
     count++;
     const indent = "  ".repeat(Math.max(0, level - 1));
-    // estimate chars in this section (until next heading)
-    let chars = 0;
-    let next = $(el).next();
-    while (next.length > 0 && !/^h[1-6]$/i.test(next[0].tagName ?? "")) {
-      chars += next.text().trim().length;
-      next = next.next();
-      if (chars > 8000) break;
-    }
+    // estimate chars in this section (same collector as section mode)
+    const body = collectSectionHtml($, $(el), level);
+    const chars = Math.min(8000, Math.max(0, textLengthOfHtml(body) - text.length));
     lines.push(`${indent}- ${text} (h${level}, ~${chars} chars)`);
   });
   if (count === 0) return "# Table of Contents\n\n_(no headings found — page has no h1-h6)_";
   lines.push("", `_${count} headings — use section="heading text" to fetch one_`);
   return lines.join("\n");
+}
+
+function tagNameOf(node: unknown): string {
+  const n = node as { name?: unknown; tagName?: unknown };
+  const raw = typeof n.name === "string" ? n.name : typeof n.tagName === "string" ? n.tagName : "";
+  return raw.toLowerCase();
+}
+
+function isHeadingTag(tag: string): boolean {
+  return /^h[1-6]$/.test(tag);
+}
+
+function headingLevel(tag: string): number {
+  const m = /^h([1-6])$/.exec(tag);
+  return m ? Number(m[1]) : 0;
+}
+
+/**
+ * Heading text with edit-link anchors stripped ("Experimental progress [edit]" → "Experimental progress").
+ */
+function cleanHeadingText($: CheerioAPI, el: unknown): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const clone = $((el as any)).clone();
+  clone.find(".mw-editsection, .editsection, .edit-link").remove();
+  return clone.text().trim().replace(/\s+/g, " ").replace(/\s*\[edit\]\s*$/i, "");
+}
+
+/** Visible text length of an HTML fragment (tags stripped). */
+function textLengthOfHtml(html: string): number {
+  return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().length;
+}
+
+function nodeClassList(node: unknown): string[] {
+  const cls = (node as { attribs?: Record<string, string> }).attribs?.["class"] ?? "";
+  return cls.split(/\s+/).filter(Boolean);
+}
+
+function isEditSectionNode(node: unknown): boolean {
+  if ((node as { type?: string }).type === "text") return false;
+  const cls = nodeClassList(node);
+  return cls.includes("mw-editsection") || cls.includes("editsection");
+}
+
+function isBlankTextNode(node: unknown): boolean {
+  const n = node as { type?: string; data?: unknown };
+  return n.type === "text" && (typeof n.data !== "string" || n.data.trim().length === 0);
+}
+
+/**
+ * Hoist a heading to its wrapper (e.g. Wikipedia `div.mw-heading` which holds
+ * only the h2 + edit-link span). Climbs through div ancestors that contain
+ * nothing but the heading subtree, edit spans, and blank text.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hoistHeading(target: any): any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let root: any = target;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let parent: any = target.parent();
+  while (parent.length > 0 && (parent.get(0)?.tagName ?? "").toLowerCase() === "div") {
+    const kids: unknown[] = parent.contents().toArray();
+    const meaningful = kids.filter(
+      (k) => k !== root.get(0) && !isEditSectionNode(k) && !isBlankTextNode(k)
+    );
+    if (meaningful.length > 0) break;
+    root = parent;
+    parent = parent.parent();
+  }
+  return root;
+}
+
+/**
+ * Collect heading + section body HTML. Sibling walk first (standard article
+ * markup); document-order walk fallback for DOMs where content is nested in
+ * containers instead of flat siblings (e.g. browser-rendered pages).
+ * Edit-link spans are never collected. Collection walks from the hoisted
+ * wrapper so wrapped headings (`div.mw-heading > h2 + span.mw-editsection`) work.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function collectSectionHtml($: CheerioAPI, target: any, targetLevel: number): string {
+  const root = hoistHeading(target);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let sectionHtml = ($.html(target as any) ?? "") as string;
+  const headLen = textLengthOfHtml(sectionHtml);
+  // pass 1: flat siblings of the (possibly hoisted) root until next heading of same/higher level
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let next: any = root.next();
+  while (next.length > 0) {
+    const node = next.get(0);
+    if (!isEditSectionNode(node)) {
+      const tag = tagNameOf(node);
+      if (isHeadingTag(tag) && headingLevel(tag) <= targetLevel) break;
+      sectionHtml += $.html(next) ?? "";
+    }
+    next = next.next();
+    if (sectionHtml.length > 200_000) break; // safety cap
+  }
+  if (textLengthOfHtml(sectionHtml) > headLen) return sectionHtml;
+  // pass 2: document-order walk after the wrapper — collect top-level nodes,
+  // skipping the wrapper subtree itself and descendants of already-collected
+  // containers (no duplicates), stopping at the next heading of same/higher level.
+  sectionHtml = $.html(target) ?? "";
+  const rootNode = root.get(0);
+  const targetNode = target.get(0);
+  const collected = new Set<unknown>();
+  const all = $("body").find("*").toArray();
+  const start = all.findIndex((n) => n === rootNode);
+  for (let i = start + 1; i < all.length && sectionHtml.length <= 200_000; i++) {
+    const node = all[i] as unknown as Record<string, unknown>;
+    if (node === targetNode || isEditSectionNode(node)) continue;
+    type ParentRef = Record<string, unknown> | null | undefined;
+    let p = node["parent"] as ParentRef;
+    let insideWrapper = false;
+    while (p && (p as Record<string, unknown>)["type"] !== "root") {
+      if (p === rootNode) { insideWrapper = true; break; }
+      p = (p as Record<string, unknown>)["parent"] as ParentRef;
+    }
+    if (insideWrapper) continue;
+    const tag = tagNameOf(node);
+    if (isHeadingTag(tag) && headingLevel(tag) <= targetLevel) break;
+    let q = node["parent"] as ParentRef;
+    let skip = false;
+    while (q && (q as Record<string, unknown>)["type"] !== "root") {
+      if (collected.has(q)) { skip = true; break; }
+      q = (q as Record<string, unknown>)["parent"] as ParentRef;
+    }
+    if (skip) continue;
+    collected.add(node);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    sectionHtml += $.html(node as any) ?? "";
+  }
+  return sectionHtml;
 }
 
 /**
@@ -203,28 +329,14 @@ export function extractSectionHtml(html: string, sectionQuery: string): string |
   let targetLevel = 0;
   $("h1, h2, h3, h4, h5, h6").each((_, el) => {
     if (target) return;
-    const text = $(el).text().trim().toLowerCase();
+    const text = cleanHeadingText($, el).toLowerCase();
     if (text.includes(q)) {
       target = $(el);
-      const tag = (el as unknown as { name?: string }).name ?? (el as unknown as { tagName?: string }).tagName?.toLowerCase() ?? "h2";
-      targetLevel = Number(tag.replace("h", "")) || 2;
+      targetLevel = headingLevel(tagNameOf(el)) || 2;
     }
   });
   if (!target || targetLevel === 0) return null;
-  // collect section HTML: heading + following siblings until heading level <= targetLevel
-  let sectionHtml = $.html(target) ?? "";
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let next: any = target.next();
-  while (next.length > 0) {
-    const tagName = (next[0] as unknown as { name?: string }).name ?? (next[0] as unknown as { tagName?: string }).tagName ?? "";
-    if (/^h[1-6]$/i.test(tagName)) {
-      const lvl = Number(tagName.toLowerCase().replace("h", "")) || 7;
-      if (lvl <= targetLevel) break;
-    }
-    sectionHtml += $.html(next) ?? "";
-    next = next.next();
-    if (sectionHtml.length > 200_000) break; // safety cap
-  }
+  const sectionHtml = collectSectionHtml($, target, targetLevel);
   return sectionHtml || null;
 }
 

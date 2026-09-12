@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.3.2] - 2026-09-12
+
+### Fixed
+- `fetch_web` **section** empty body (Task 07 P1): `extractSectionHtml()` now normalizes heading text (edit-link anchors stripped), hoists wrapped headings (`div.mw-heading > h2 + span.mw-editsection`) via `hoistHeading()`, skips edit spans during collection, and falls back to a document-order walk when content is not a flat sibling of the heading. `extractToc()` char estimates use the same collector. Verified live: `Experimental progress` section went from 153 chars (heading only) to real body text.
+- `search_web` **news/entity empty on long queries** (Task 07 P2): empty-only fallback — original vertical runs first; only when merged results are empty, retry once with `simplifyQuery()` (strips quotes, `site:`, AND/OR/NOT, +/- prefixes), then once as plain `web` intent. Non-empty first passes untouched (simple-query baseline cannot regress).
+- `search_web` **deadline.hit with zero data** (Task 07 P3): on outer deadline with no results, a cheap browser-free fallback (plain-HTTP DDG-html + Mojeek parse) returns partial results instead of a bare error; original `deadline.hit` thrown only when fallback is also empty. Verified live: 3s deadline returned 5 ranked partials (server log `returning 5 cheap-fallback partial results`).
+- `search_web` **paper relevance** (Task 07 P4): arXiv vertical drops withdrawn/retracted entries (`/\bwithdrawn\b|\bretract(?:ed|ion)?s?\b/i` word-boundary on title+summary — keeps legitimate "Retractable" titles), fetches 10 candidates, and re-ranks by title-phrase > title-token > summary-phrase scoring. Verified live: zero withdrawn matches, title-matched papers on top.
+
 ## [2.3.1] - 2026-09-01
 
 ### Added

@@ -7,7 +7,7 @@ This document serves as a critical, living description of blowsh-mcp's architect
 ```
 blowsh-mcp/
 ├── src/                            # All server-side code
-│   ├── server.ts                   # MCP Server wiring: stdio transport, tool list, routing, lifecycle (5 tools in v2.3.1)
+│   ├── server.ts                   # MCP Server wiring: stdio transport, tool list, routing, lifecycle (5 tools in v2.3.2)
 │   ├── browshManager.ts            # Browsh process lifecycle + HTTP fetch (PLAIN/DOM modes)
 │   ├── html2markdownManager.ts     # Spawn wrapper for the html2markdown CLI
 │   ├── ssrf.ts                     # assertSafeUrl guard (DNS-resolved private-IP blocklist)
@@ -37,7 +37,7 @@ blowsh-mcp/
 [MCP Client / AI Agent]
       │  JSON-RPC (stdio)
       ▼
-[MCP Server: blowsh-mcp 2.3.1]
+[MCP Server: blowsh-mcp 2.3.2]
    ├─ tools: fetch_web, search_web, crawl_web, extract_links, fetch_web_batch
    ├─ assertSafeUrl()  ──►  SSRF blocklist (private/loopback/link-local)
    ├─ pageCache (TTL)  ──►  repeated calls served without re-render
@@ -96,7 +96,7 @@ blowsh-mcp/
 ## 6. Deployment & Infrastructure
 
 - **Provider:** Any server with Docker; runs completely offline-of-host once the image is pulled.
-- **Distribution:** Prebuilt image on GitHub Container Registry — `ghcr.io/mokhtarabadi/blowsh-mcp:latest` (also tagged `2.3.1`, branch, semver, and `sha-<sha>`). Pull with `docker pull ghcr.io/mokhtarabadi/blowsh-mcp:latest`.
+- **Distribution:** Prebuilt image on GitHub Container Registry — `ghcr.io/mokhtarabadi/blowsh-mcp:latest` (also tagged `2.3.2`, branch, semver, and `sha-<sha>`). Pull with `docker pull ghcr.io/mokhtarabadi/blowsh-mcp:latest`.
 - **CI/CD:** GitHub Actions (`.github/workflows/docker-publish.yml`) builds the Dockerfile and pushes to ghcr on `main` pushes and `v*` tags, with a container smoke test (MCP initialize → tools/list) before the run completes.
 - **Form factor:** MCP server over stdio (no listening port). The Browsh HTTP port stays container-private.
 - **CI/CD:** none currently; verify with build + `docker build` + JSON-RPC smoke test.

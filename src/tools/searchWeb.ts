@@ -243,7 +243,7 @@ async function fetchGithubResults(query: string): Promise<SearchResult[]> {
     await assertSafeUrl(url);
     const res = await axios.get(url, {
       timeout: 6000,
-      headers: { "User-Agent": "blowsh-mcp/2.3.0", Accept: "text/html" },
+      headers: { "User-Agent": "blowsh-mcp/2.3.2", Accept: "text/html" },
       maxRedirects: 3,
     });
     const $ = load(String(res.data));
@@ -272,24 +272,46 @@ async function fetchGithubResults(query: string): Promise<SearchResult[]> {
   }
 }
 
+/** Withdrawn/retracted entries must never outrank real papers (word-boundary: keeps "Retractable"). */
+const WITHDRAWN_RE = /\bwithdrawn\b|\bretract(?:ed|ion)?s?\b/i;
+
+function scoreArxivResult(title: string, summary: string, query: string): number {
+  const t = title.toLowerCase();
+  const s = summary.toLowerCase();
+  const phrase = query.toLowerCase().replace(/\s+/g, " ").trim();
+  const toks = phrase.split(" ").filter((w) => w.length > 1);
+  let score = 0;
+  if (phrase.length > 2 && t.includes(phrase)) score += 5;
+  score += toks.filter((w) => t.includes(w)).length * 2;
+  if (phrase.length > 2 && s.includes(phrase)) score += 1;
+  score += toks.filter((w) => s.includes(w)).length * 0.2;
+  return score;
+}
+
 async function fetchArxivResults(query: string): Promise<SearchResult[]> {
   try {
     await assertSafeUrl("http://export.arxiv.org/");
     const res = await axios.get("http://export.arxiv.org/api/query", {
-      params: { search_query: `all:${query}`, start: 0, max_results: 5 },
+      params: { search_query: `all:${query}`, start: 0, max_results: 10 },
       timeout: 6000,
       responseType: "text",
     });
     const xml = String(res.data);
     const $ = load(xml, { xmlMode: true });
-    const out: SearchResult[] = [];
+    const scored: Array<{ result: SearchResult; score: number }> = [];
     $("entry").each((_, el) => {
       const title = $(el).find("title").first().text().trim().replace(/\s+/g, " ");
       const url = $(el).find("id").first().text().trim();
       const summary = $(el).find("summary").first().text().trim().replace(/\s+/g, " ").slice(0, 300);
-      if (title && url) out.push({ title, url, snippet: summary, fetched_at: 0 });
+      if (!title || !url) return;
+      if (WITHDRAWN_RE.test(`${title} ${summary}`)) return; // drop withdrawn/retracted
+      scored.push({
+        result: { title, url, snippet: summary, fetched_at: 0 },
+        score: scoreArxivResult(title, summary, query),
+      });
     });
-    return out;
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, 5).map((s) => s.result);
   } catch {
     return [];
   }
@@ -320,6 +342,24 @@ async function fetchHnResults(query: string): Promise<SearchResult[]> {
 // ---------------------------------------------------------------------------
 
 export type SearchIntent = "auto" | "web" | "code" | "paper" | "news" | "entity";
+
+/**
+ * Simplifies an over-constrained query for fallback retries: strips quotes,
+ * site: filters, boolean operators and +/- prefixes. Used ONLY when the
+ * vertical already returned empty — the original query always runs first.
+ */
+function simplifyQuery(q: string): string {
+  return q
+    .replace(/"/g, "")
+    .replace(/\bsite:\S+/gi, "")
+    .replace(/\b(AND|OR|NOT)\b/gi, " ")
+    .split(/\s+/)
+    .map((t) => t.replace(/^[+-]/, ""))
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 function detectIntent(query: string, forced?: string): SearchIntent {
   if (forced && forced !== "auto") return forced as SearchIntent;
@@ -414,6 +454,33 @@ function mergeResults(sets: SearchResult[][]): SearchResult[] {
 }
 
 // ---------------------------------------------------------------------------
+// Cheap browser-free fallback (used ONLY after a deadline.hit with zero data)
+// ---------------------------------------------------------------------------
+
+const CHEAP_UA = { "User-Agent": "blowsh-mcp/2.3.2", Accept: "text/html" };
+
+/**
+ * Fetches DDG-html + Mojeek pages over plain HTTP (no Browsh) and parses
+ * them with the standard organic parsers. Best-effort: any failure yields [].
+ */
+async function fetchCheapFallback(query: string, max: number): Promise<SearchResult[]> {
+  const jobs: Promise<SearchResult[]>[] = [
+    axios
+      .get(ddgSearchUrl(query, 1), { timeout: 8000, headers: CHEAP_UA, maxRedirects: 3 })
+      .then((r) => parseDuckDuckGo(String(r.data), "https://duckduckgo.com/"))
+      .catch(() => [] as SearchResult[]),
+    axios
+      .get(mojeekSearchUrl(query, 1), { timeout: 8000, headers: CHEAP_UA, maxRedirects: 3 })
+      .then((r) => parseMojeek(String(r.data), "https://www.mojeek.com/"))
+      .catch(() => [] as SearchResult[]),
+  ];
+  const sets = await Promise.all(jobs);
+  const now = Date.now();
+  const merged = mergeResults(sets.filter((s) => s.length > 0));
+  return merged.slice(0, max).map((r) => ({ ...r, fetched_at: now }));
+}
+
+// ---------------------------------------------------------------------------
 // Single-query search (engines + verticals + merge)
 // ---------------------------------------------------------------------------
 
@@ -423,7 +490,8 @@ async function searchSingleQuery(
   page: number,
   enrich: boolean,
   intent: SearchIntent,
-  deadlineMs?: number
+  deadlineMs?: number,
+  retried = false
 ): Promise<SearchResult[]> {
   const cacheKey = cacheKeyForQuery(query, intent);
   const cached = queryCache.get(cacheKey);
@@ -479,6 +547,16 @@ async function searchSingleQuery(
     }
 
     let merged = mergeResults(engineResults);
+
+    // Empty-only fallback: brittle vertical queries (long news/entity strings)
+    // retry once simplified, then once as plain web. Non-empty first passes
+    // are untouched, so the simple-query baseline cannot regress.
+    if (merged.length === 0 && !instantAnswer && !retried && (intent === "news" || intent === "entity")) {
+      const simple = simplifyQuery(query);
+      if (simple && simple.toLowerCase() !== query.toLowerCase().replace(/\s+/g, " ").trim()) {
+        return searchSingleQuery(simple, maxResults, page, enrich, "web", deadlineMs, true);
+      }
+    }
 
     // Enrichment: replace the top-3 organic snippets with fetched main-content
     // markdown. Best-effort, sequential, and hard-bounded by a wall-clock budget
@@ -586,7 +664,20 @@ export async function searchWeb(
     return Promise.race([
       run(),
       new Promise<SearchResult[]>((_, reject) => setTimeout(() => reject(deadlineError), timeoutMs)),
-    ]);
+    ]).catch(async (e) => {
+      // Deadline with zero data is the worst failure mode: try a cheap
+      // browser-free fallback (plain HTTP engine pages) and return whatever
+      // it yields as partial results. Only throw when fallback is empty too.
+      if ((e as unknown as { code?: string })?.code !== "deadline.hit") throw e;
+      try {
+        const partial = await fetchCheapFallback(query, max);
+        if (partial.length > 0) {
+          console.error(`[searchWeb] deadline.hit — returning ${partial.length} cheap-fallback partial results`);
+          return partial;
+        }
+      } catch { /* fall through to original error */ }
+      throw e;
+    });
   }
 
   return run();
