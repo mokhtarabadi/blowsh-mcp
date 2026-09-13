@@ -37,6 +37,8 @@ blowsh-mcp is a Model Context Protocol (MCP) server that exposes Browsh — a fu
   -> **Do** follow the Defensive Shell Protocol: `set -euo pipefail`, ban error masking, sidecar isolation for Docker backups. See `docs/conventions.md`.
 - **Don't** perform financial mutations without snapshotting the prior state or allow nulls in monetary aggregations.
   -> **Do** follow the Universal Financial Ledger Standard: snapshot-on-write, `$ifNull` precedence, discrepancy alerting, deep config merging. See `docs/conventions.md`.
+- **Don't** leave task numbers in visible prompt prose, section headings, or skill instructions.
+  -> **Do** keep task-number references in code comments, CHANGELOG entries, task files, history archives, and HTML comments only. See `docs/conventions.md`.
 - **Don't** carry over assumptions, partial results, or architectural hypotheses from a previous task.
   -> **Do** flush context and treat every task as contextually independent (Buffer Isolation directive in validation-phase).
 - **Don't** execute raw, informal, or non-English (Farsi) prompts directly.
@@ -111,7 +113,7 @@ When finishing a task, you MUST execute these exact steps in order:
 ## 🛑 LITE MODE PROTOCOL
 
 - **Eligibility:** When a task is single-file, has no security/financial impact, and has obvious simplicity, the full 9-step production line can be bypassed.
-- **Justification:** The Hands MUST log a `[LITE]` justification entry in the task's `## Manager Decisions` section using the format `**[YYYY-MM-DD] [LITE] [EXECUTION-DETECTED]:** <reason>`.
+- **Justification:** The Hands MUST log a `[LITE]` justification entry in the task's `## Execution Log & Reasoning` section using the format `**[YYYY-MM-DD] [LITE] [EXECUTION-DETECTED]:** <reason>`.
 - **Escalation:** If hidden complexity is discovered mid-execution, escalation to Full Mode is mandatory — the Hands MUST halt Lite execution and switch to the complete workflow.
 - **Guardrail:** Lite Mode is never allowed for multi-file changes, security-sensitive paths, or financial ledger operations.
 
