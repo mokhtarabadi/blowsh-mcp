@@ -24,8 +24,16 @@ LABEL org.opencontainers.image.source="https://github.com/mokhtarabadi/blowsh-mc
 LABEL org.opencontainers.image.licenses="MIT"
 
 ENV NODE_ENV=production
+ENV TZ=UTC
 ENV BROWSH_FIREFOX_PATH=/usr/bin/firefox-esr
 ENV HTML2MARKDOWN_PATH=html2markdown
+# Persistent Browsh/Firefox profile (cookies, history, storage survive restarts
+# when backed by a named volume or bind-mount). Browsh 1.8.0 offers no
+# profile-dir flag, so the server redirects the Browsh child's HOME here.
+ENV BROWSH_PROFILE_DIR=/data/browsh-profile
+# Terminal dims for the Browsh child (Browsh 1.8.0 has no dims flag).
+ENV BROWSH_COLS=160
+ENV BROWSH_ROWS=60
 
 # Install Firefox (Browsh backend), Browsh CLI, and the html2markdown CLI — a fat image
 # includes every external binary the server needs, so no host-side deps are required.
@@ -47,6 +55,10 @@ COPY --from=builder /build/node_modules ./node_modules
 COPY package.json ./
 COPY .env.example .env.example
 COPY README.md ./
+
+# Writable profile home + persistent volume for cookies/history across restarts.
+RUN mkdir -p /data/browsh-profile
+VOLUME /data/browsh-profile
 
 # No EXPOSE: Browsh's HTTP port is not configurable and must stay private.
 # Run MCP server over stdio; Browsh binds 127.0.0.1:4333 inside the container.

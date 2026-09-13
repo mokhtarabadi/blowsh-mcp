@@ -276,6 +276,17 @@ async function runServer() {
   await server.connect(transport);
   console.error("blowsh-mcp MCP server running on stdio");
 
+  // Boot prewarm (BROWSH_PREWARM=0 disables): bring the browser up at server
+  // start so the first tool call never pays the ~40s cold start. Fire-and-
+  // forget — a failed prewarm only logs; tools lazily start on demand.
+  if (process.env.BROWSH_PREWARM !== "0") {
+    void browshManager
+      .prewarm()
+      .catch((e) =>
+        console.error("[browshManager] boot prewarm failed (lazy start still active):", e instanceof Error ? e.message : String(e))
+      );
+  }
+
   const shutdown = async (signal?: string | Error) => {
     try {
       await browshManager.shutdown();

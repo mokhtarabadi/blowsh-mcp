@@ -18,6 +18,28 @@ export class TtlCache<K, V> {
     this.store.set(key, { expiresAt: Date.now() + this.ttlMs, value });
   }
 
+  /**
+   * Live entry count (expired entries purged first). Used by bounded
+   * caches (e.g. guard verdicts) to enforce a max-size LRU-ish cap.
+   */
+  get size(): number {
+    this.purgeExpired();
+    return this.store.size;
+  }
+
+  /** Remove the oldest-inserted entry (Map preserves insertion order). */
+  deleteOldest(): void {
+    const oldest = this.store.keys().next();
+    if (!oldest.done) this.store.delete(oldest.value);
+  }
+
+  private purgeExpired(): void {
+    const now = Date.now();
+    for (const [k, e] of this.store) {
+      if (now > e.expiresAt) this.store.delete(k);
+    }
+  }
+
   clear(): void {
     this.store.clear();
   }

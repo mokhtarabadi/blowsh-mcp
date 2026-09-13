@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Browsh hardening (Task 08): persistent Firefox profile via `BROWSH_PROFILE_DIR` (default `/data/browsh-profile`, HOME-redirection for the Browsh child; Dockerfile declares `VOLUME`; corrupt profile quarantined to `<dir>.corrupt-<ts>` with one fresh-boot retry), boot-time `prewarm()` (brings the browser up at server start; the first fetch awaits it via `awaitWarmup()` instead of racing it; `BROWSH_PREWARM=0` disables), terminal dims `BROWSH_COLS`/`BROWSH_ROWS` (160x60) passed as `COLUMNS`/`LINES`, `TZ=UTC`, and spawn telemetry on stderr. Verified live: volume holds real profile (`cookies.sqlite`, `cert9.db`), second boot reuses it, `prewarm complete` in logs.
+- Bot-guard detection + logging (Task 08, new `src/guard.ts`): strong-marker → immediate kind (`captcha`, `rate-limit`, `ip-block`, `browser-check`, `consent-wall`...), weak rule now (≥2 weak + structural signal `<form`/`<iframe`/`type=password`/`data-sitekey`) OR ≥3 weak (fewer blog-post false positives), 1h `TtlCache` verdict cache capped at 1000 entries (`cacheGuardVerdict()`, LRU via `deleteOldest`), one JSON stderr line per fetch (`event:fetch` + host + guard status + duration; `GUARD_DETECT=0` kill-switch), additive HTML-comment trailer on guarded HTML only (non-HTML guarded hits return bytes unchanged). 20 unit checks pass (`tests/guard-detector-tests.ts`).
+- `.env.example`: documents `BROWSH_PROFILE_DIR`, `BROWSH_COLS`, `BROWSH_ROWS`, `BROWSH_PREWARM`, `BROWSH_RECYCLE_REQUESTS`, `GUARD_DETECT`, `GUARD_CACHE_TTL_MS`.
+- QA hotfix (Task 08): `quarantineProfileDir` default-deny allowlist (only under `/data` or OS TMP, never the roots, depth ≥3 — refuses with loud log instead of risking host paths); `BROWSH_COLS/ROWS` clamped (80–250/24–100, fallback 160x60 + warning); boot logs `fresh profile dir` vs `reusing profile (N entries)`. Verified live: corrupt-profile recovery (EEXIST → quarantine → fresh boot → `prewarm complete`); width A/B stayed unproven (Browsh fresh-startup flake under load, host egress fine) — A3 unchecked with caveat.
+
 ## [2.3.2] - 2026-09-12
 
 ### Fixed

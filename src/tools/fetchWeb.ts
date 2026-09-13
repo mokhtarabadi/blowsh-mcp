@@ -18,6 +18,13 @@ import {
   applyOffset,
 } from "../extract.js";
 import { FetchError } from "../errors.js";
+import {
+  detectGuard,
+  guardTrailer,
+  guardVerdictCache,
+  cacheGuardVerdict,
+  logGuardFetch,
+} from "../guard.js";
 import axios from "axios";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -536,6 +543,57 @@ async function fetchWebInner(opts: FetchWebOptions): Promise<string> {
 }
 
 export async function fetchWeb(opts: FetchWebOptions): Promise<string> {
+  const startedAt = Date.now();
+  const host = hostOf(opts.url);
+  try {
+    // First-fetch discipline (A2): when the browser path may run, wait for
+    // an in-flight boot prewarm instead of racing it. No-op when prewarm
+    // never ran. Skipped for tier "1" (HTTP-only) and pdf (never browser).
+    // Bypass is airtight: tier "1" throws FetchError on HTTP failure (never
+    // falls back to Browsh) and pdf uses extractPdf only — verified by
+    // reading the tierMode === "1" branch and the type === "pdf" branch.
+    if (opts.tier !== "1" && opts.type !== "pdf") {
+      await browshManager.awaitWarmup();
+    }
+    const out = await fetchWebNoGuard(opts);
+    const elapsedMs = Date.now() - startedAt;
+    // Advisory-only guard detection on the served slice (never throws,
+    // never changes routing). GUARD_DETECT=0 kills detection + trailer.
+    if (process.env.GUARD_DETECT === "0") {
+      logGuardFetch(host, { guarded: false, kind: null, signals: [] }, elapsedMs);
+      return out;
+    }
+    const live = detectGuard(out);
+    const cached = guardVerdictCache.get(host);
+    if (live.guarded) {
+      cacheGuardVerdict(host, live);
+      logGuardFetch(host, live, elapsedMs);
+      // Trailer is an HTML comment: emit ONLY for HTML output so plain /
+      // markdown / pdf consumers never see comment noise. Cache + JSON log
+      // still apply to every type.
+      return opts.type === "html" ? out + guardTrailer(host, live.kind!) : out;
+    }
+    if (cached?.guarded) {
+      logGuardFetch(host, { guarded: true, kind: cached.kind, signals: ["recovered"] }, elapsedMs);
+      return out;
+    }
+    logGuardFetch(host, live, elapsedMs);
+    return out;
+  } catch (e) {
+    logGuardFetch(host, { guarded: false, kind: null, signals: ["error"] }, Date.now() - startedAt);
+    throw e;
+  }
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "unknown";
+  }
+}
+
+async function fetchWebNoGuard(opts: FetchWebOptions): Promise<string> {
   // deadline_ms wrapper — honest deadline.hit error, never silent hang
   if (opts.deadline_ms && opts.deadline_ms > 0) {
     const ms = Math.max(500, Math.min(600_000, opts.deadline_ms));

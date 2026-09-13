@@ -2,6 +2,9 @@ import { spawn, ChildProcess } from "child_process";
 import axios from "axios";
 import { FetchError } from "./errors.js";
 import { pageCache } from "./cache.js";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 /**
  * Strips terminal-style layout whitespace from Browsh plain text output.
@@ -13,6 +16,29 @@ import { pageCache } from "./cache.js";
  *    preserving relative indentation (e.g. code blocks, nested lists).
  * 4. Trims trailing spaces from each line.
  */
+/**
+ * Parse an integer env var with range clamp. Unset/non-numeric → silent
+ * fallback; out-of-range → fallback with a loud warning (a typo like
+ * BROWSH_COLS=1600 must never silently spawn a degenerate terminal).
+ */
+function clampIntEnv(
+  raw: string | undefined,
+  min: number,
+  max: number,
+  fallback: number,
+  label: string
+): number {
+  const n = Number.parseInt(raw ?? "", 10);
+  if (!Number.isFinite(n)) return fallback;
+  if (n < min || n > max) {
+    console.error(
+      `[browshManager] ${label}=${raw} out of range [${min},${max}], using ${fallback}`
+    );
+    return fallback;
+  }
+  return n;
+}
+
 function cleanPlainText(text: string): string {
   // Step 1–2: remove blank lines and collapse runs
   const cleaned = text
@@ -55,12 +81,16 @@ function cleanPlainText(text: string): string {
  * for runtime diagnosis.
  */
 class BrowshManager {
+  private warmup: Promise<void> | null = null;
   private process: ChildProcess | null = null;
   private readonly firefoxPath: string;
   private readonly healthPath: string = "/";
   private readonly requestTimeoutMs: number;
   private readonly recycleThreshold: number;
   private readonly idleTimeoutMs: number;
+  private readonly profileDir: string;
+  private readonly cols: number;
+  private readonly rows: number;
 
   private requestCount = 0;
   private busy = false;
@@ -75,22 +105,104 @@ class BrowshManager {
     this.requestTimeoutMs = Number(process.env.BROWSH_REQUEST_TIMEOUT_MS) || 30_000;
     this.recycleThreshold = Number(process.env.BROWSH_RECYCLE_REQUESTS) || 100;
     this.idleTimeoutMs = Number(process.env.BROWSH_IDLE_TIMEOUT_MS) || 600_000;
+    // Persistent Firefox profile: Browsh 1.8.0 offers no profile-dir flag, so
+    // the whole child HOME is redirected — everything Firefox persists
+    // (cookies, history, storage) lives under profileDir.
+    this.profileDir = process.env.BROWSH_PROFILE_DIR || "/data/browsh-profile";
+    // Terminal dims for the Browsh child. Browsh 1.8.0 has no dims flag and
+    // http-server-mode renders wide regardless (measured >= 100 cols), but
+    // the explicit 160x60 env replaces any 80x24 fallback in the launcher path.
+    this.cols = clampIntEnv(process.env.BROWSH_COLS, 80, 250, 160, "BROWSH_COLS");
+    this.rows = clampIntEnv(process.env.BROWSH_ROWS, 24, 100, 60, "BROWSH_ROWS");
   }
 
   /** Start Browsh if not running. */
   async ensureStarted(): Promise<void> {
     if (this.isRunning) return;
+    try {
+      fs.mkdirSync(this.profileDir, { recursive: true });
+      const entries = fs.readdirSync(this.profileDir).length;
+      console.error(
+        entries > 0
+          ? `[browshManager] reusing profile (${entries} entries): ${this.profileDir}`
+          : `[browshManager] fresh profile dir: ${this.profileDir}`
+      );
+      await this.spawnAndWait();
+    } catch (e) {
+      // Any boot-path failure (mkdir blocked by a file, spawn timeout from a
+      // stale lock / torn storage): quarantine the path, start fresh, warn
+      // loudly. Retry ONLY when quarantine actually moved the path aside;
+      // otherwise rethrow (bounded, never loops).
+      const backup = quarantineProfileDir(this.profileDir);
+      if (backup === null) {
+        throw e;
+      }
+      await this.spawnAndWait();
+      if (e instanceof Error) {
+        console.error(`[browshManager] start failed on first attempt: ${e.message}`);
+      }
+    }
+  }
+
+  /**
+   * Boot prewarm: bring the browser up AND prove it renders (one warmup
+   * render of example.com through the request mutex) so the first fetch
+   * never cold-starts. HTTP-health alone is not render-ready: Firefox /
+   * Marionette may still be starting when the endpoint answers, and a
+   * render issued in that window hangs until the request timeout.
+   * Never rejects: a failed warmup logs a warning and resolves, so boot
+   * and the first fetch stay alive even when the warmup render fails.
+   */
+  prewarm(): Promise<void> {
+    if (!this.warmup) {
+      this.warmup = this.ensureStarted()
+        .then(() => this.fetchRaw("https://example.com", "PLAIN"))
+        .then(() => {
+          console.error("[browshManager] prewarm complete (warmup render ok)");
+        })
+        .catch((e: unknown) => {
+          console.error(
+            `[browshManager] prewarm failed (continuing): ${e instanceof Error ? e.message : String(e)}`
+          );
+        });
+    }
+    return this.warmup;
+  }
+
+  /**
+   * Resolve when an in-flight boot prewarm finishes; no-op when prewarm
+   * never ran (BROWSH_PREWARM=0) or already settled. Lets the first fetch
+   * wait for boot instead of racing it.
+   */
+  async awaitWarmup(): Promise<void> {
+    await this.warmup;
+  }
+
+  /** Spawn the Browsh child and wait for its HTTP endpoint. */
+  private async spawnAndWait(): Promise<void> {
     // Only support --http-server-mode and (optionally) --firefox.path
     const args = ["--http-server-mode"];
     if (this.firefoxPath && this.firefoxPath !== "firefox") {
       args.push("--firefox.path", this.firefoxPath);
     }
+    console.error(
+      `[browshManager] spawning browsh (home=%s, term=%dx%d)`,
+      this.profileDir,
+      this.cols,
+      this.rows
+    );
     this.process = spawn("browsh", args, {
       stdio: ["ignore", "inherit", "inherit"],
       // Own process group so we can tear down browsh AND its Firefox child
       // together — SIGTERM to browsh alone orphans Firefox, which then holds
       // the profile lock and blocks every subsequent restart.
       detached: true,
+      env: {
+        ...process.env,
+        HOME: this.profileDir,
+        COLUMNS: String(this.cols),
+        LINES: String(this.rows),
+      },
     });
     const ready = await this.waitForReady(30000);
     if (!ready) {
@@ -361,3 +473,44 @@ class BrowshManager {
 }
 
 export const browshManager = new BrowshManager();
+
+/**
+ * Move a suspect profile dir aside (`<dir>.corrupt-<ts>`) and recreate it
+ * empty. Exported for unit testing. Returns the backup path, or null when
+ * the rename failed (caller retries against the same dir once anyway).
+ *
+ * SAFETY (default-deny allowlist): BROWSH_PROFILE_DIR is operator-controlled
+ * env input, and this function renames that path — so it refuses anything
+ * outside the known profile bases (/data, os.tmpdir()), refuses the bases
+ * themselves, and refuses shallow paths (depth < 3, e.g. "/x"). A typo like
+ * BROWSH_PROFILE_DIR=/ can never move host data aside. Returns null on
+ * refusal (loud warning); the caller then rethrows instead of retrying.
+ */
+export function quarantineProfileDir(profileDir: string): string | null {
+  const resolved = path.resolve(profileDir);
+  const dataRoot = path.resolve("/data");
+  const tmpRoot = path.resolve(os.tmpdir());
+  const under = (root: string): boolean =>
+    resolved === root || resolved.startsWith(root + path.sep);
+  const depth = resolved.split(path.sep).length;
+  const allowed =
+    (under(dataRoot) && resolved !== dataRoot && depth >= 3) ||
+    (under(tmpRoot) && resolved !== tmpRoot && depth >= 3);
+  if (!allowed) {
+    console.error(
+      `[browshManager] quarantine REFUSED for unexpected profile dir: ${resolved} (not under /data or TMP)`
+    );
+    return null;
+  }
+  const backup = `${profileDir}.corrupt-${Date.now()}`;
+  try {
+    fs.renameSync(profileDir, backup);
+    console.error(
+      `[browshManager] quarantined suspect profile to ${backup}, retrying fresh`
+    );
+    fs.mkdirSync(profileDir, { recursive: true });
+    return backup;
+  } catch {
+    return null;
+  }
+}
