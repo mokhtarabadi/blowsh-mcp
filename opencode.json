@@ -1,14 +1,34 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "blowsh": {
-      "type": "local",
-      "command": ["docker", "run", "--rm", "-i", "ghcr.io/mokhtarabadi/blowsh-mcp:latest"],
-      "enabled": true,
-      "timeout": 120000
+  "default_agent": "cognitive-executor",
+  "instructions": [
+    "AGENTS.md",
+    "docs/architecture.md",
+    "docs/data_model.md",
+    "docs/conventions.md"
+  ],
+  "formatter": false,
+  "lsp": {
+    "language-server": {
+      "typescript": {
+        "command": [
+          "typescript-language-server",
+          "--stdio"
+        ]
+      }
     }
   },
   "permission": {
-    "blowsh_*": "allow"
+    "blowsh_*": "allow",
+    "bash": {
+      "git add": "deny",
+      "git add *": "deny",
+      "git checkout": "deny",
+      "git checkout *": "deny",
+      "git commit": "deny",
+      "git commit *": "deny",
+      "git push": "deny",
+      "git push *": "deny"
+    }
   }
 }
