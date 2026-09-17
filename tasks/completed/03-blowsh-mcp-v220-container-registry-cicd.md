@@ -36,14 +36,14 @@ Ship blowsh-mcp as a prebuilt container image on GitHub Container Registry (`ghc
 
 ## Acceptance Criteria
 
-- [ ] `ghcr.io/mokhtarabadi/blowsh-mcp:latest` exists and is pullable by an unauthenticated client (public) or documented as private
-- [ ] GitHub Actions workflow builds and pushes the image on `main` push and on `v*` tags
-- [ ] CI smoke test passes (container boots, `tools/list` returns the 4 tools)
-- [ ] README documents `docker pull ghcr.io/mokhtarabadi/blowsh-mcp:latest` and the opencode/Claude config using the published image
-- [ ] `docs/architecture.md` deployment section mentions the registry + CI/CD
-- [ ] `CHANGELOG.md` has a v2.2.0 entry
-- [ ] `~/.config/opencode/opencode.jsonc` uses the published image
-- [ ] `lint_task_file` passes; task file moved to `tasks/qa/` with updated `**File:**` header
+- [x] `ghcr.io/mokhtarabadi/blowsh-mcp:latest` exists and is pullable by an unauthenticated client (public) or documented as private
+- [x] GitHub Actions workflow builds and pushes the image on `main` push and on `v*` tags
+- [x] CI smoke test passes (container boots, `tools/list` returns the 4 tools)
+- [x] README documents `docker pull ghcr.io/mokhtarabadi/blowsh-mcp:latest` and the opencode/Claude config using the published image
+- [x] `docs/architecture.md` deployment section mentions the registry + CI/CD
+- [x] `CHANGELOG.md` has a v2.2.0 entry
+- [x] `~/.config/opencode/opencode.jsonc` uses the published image
+- [x] `lint_task_file` passes; task file moved to `tasks/qa/` with updated `**File:**` header
 
 ## Verification Evidence
 
@@ -56,10 +56,10 @@ Ship blowsh-mcp as a prebuilt container image on GitHub Container Registry (`ghc
 
 The task is NOT done unless ALL of the following are true (unconditional, applies to every source type):
 
-- [ ] Build/Test/Lint pass with exit code 0
-- [ ] `lint_task_file` passes on the active task file
-- [ ] `CHANGELOG.md` updated via Parse-Then-Append
-- [ ] `verification-before-completion` applied and evidence recorded
+- [x] Build/Test/Lint pass with exit code 0
+- [x] `lint_task_file` passes on the active task file
+- [x] `CHANGELOG.md` updated via Parse-Then-Append
+- [x] `verification-before-completion` applied and evidence recorded
 
 ## Risk & Rollback
 
@@ -101,6 +101,20 @@ _Stage: implementation (2026-08-17)._
 - **Tags published:** `latest`, `main`, `sha-<7>`, plus semver tags on `v*` releases.
 - **Global opencode config:** `~/.config/opencode/opencode.jsonc` blowsh MCP now runs `ghcr.io/mokhtarabadi/blowsh-mcp:latest` (timeout 120 s). Requires opencode restart to take effect (config loaded once at startup).
 - Non-blocking note: GitHub Actions deprecation warning — Node 20 actions (`actions/checkout@v4`, docker actions) will be forced to Node 24; consider bumping action majors in a future task.
+
+### Closure re-verification (2026-09-17, autopilot task-by-task)
+
+- `npm run build` → exit 0, zero errors (tsc strict gate passes on current tree).
+- `.github/workflows/docker-publish.yml` re-read: triggers `main` + `v*` + `workflow_dispatch`, `packages: write`, smoke step greps `fetch_web` — matches AC.
+- README lines 54-55 (`docker pull`/`run`), 311 (opencode config example) — AC documented.
+- `docs/architecture.md` line 99 — registry distribution documented.
+- `CHANGELOG.md` `## [2.2.0]` entry present (lines 80-89).
+- Image liveness: entire 2026-09-17 audit ran against `ghcr.io/mokhtarabadi/blowsh-mcp:latest` (search/fetch/crawl/batch all served) — pullable and functional.
+- Config filename correction: no `opencode.jsonc` exists on this machine; the live global config is `~/.config/opencode/opencode.json` (lines 48-55) and it runs the published image. AC substance satisfied; filename in AC is stale.
+- Known follow-up (not blocking): architecture §6 still carries a stale `CI/CD: none` line contradicting the registry section — filed separately in the docs-gap task.
+- Manager standing order applied: autopilot task-by-task with Brain at every seat; reviewer technical APPROVED + PO_REVIEW_PENDING counts as Manager acceptance for closure.
+- ⏸️ Reviewer seat BLOCKED 2026-09-17: two `brain_turn` attempts failed at transport (`ConnectError: Temporary failure in name resolution`, provider unreachable). No verdict yet — task stays in `tasks/qa/`, NOT closed. Retry review when network recovers.
+- ✅ Reviewer verdict 2026-09-17 (retry after network recovery): Code Reviewer technical APPROVED + `PO_REVIEW_PENDING`. No blocking issues; `opencode.jsonc` filename drift ruled non-blocking. Manager standing order: "reviewer approved = accepted" → counts as closure acceptance. Proceeding to single-issuance closure XML.
 
 ## Factual Git Diff
 
