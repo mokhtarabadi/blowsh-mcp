@@ -1,9 +1,9 @@
 # Task 03: Blowsh-MCP v2.2 — Container Registry Distribution & CI/CD
 
-**File:** `tasks/qa/03-blowsh-mcp-v220-container-registry-cicd.md`
+**File:** `tasks/completed/03-blowsh-mcp-v220-container-registry-cicd.md`
 **Source:** manager
 **Type:** feature
-**Status:** in-review
+**Status:** closed
 
 ## Goal
 
@@ -119,7 +119,5 @@ _Stage: implementation (2026-08-17)._
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-```diff
-No code changes detected or staged.
-```
+**Factual Git Diff:** Stored in Commit Hash: `6d6cc49e13cd9206c08862639a19a4f4cb409728`
 <!-- END_GIT_DIFF -->
