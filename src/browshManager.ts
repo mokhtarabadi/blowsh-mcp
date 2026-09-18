@@ -354,7 +354,18 @@ class BrowshManager {
         return this.fetchRawInner(url, mode, true, signal);
       }
       if (axios.isAxiosError(error)) {
-        throw new FetchError(`Request failed: ${error.message}`, { url });
+        const msg = error.message ?? "unknown transport error";
+        const timedOut = error.code === "ECONNABORTED" || msg.toLowerCase().includes("timeout");
+        // D1: a render timeout is transient and URL-scoped — say so explicitly
+        // so batch callers know the item (not the batch) failed and a retry
+        // of the single URL is safe. The mutex is released by fetchRaw's
+        // finally, so siblings proceed unaffected.
+        throw new FetchError(
+          timedOut
+            ? `Request failed: ${msg} (transient render timeout after ${this.requestTimeoutMs}ms; retry this URL alone or in a smaller batch)`
+            : `Request failed: ${msg}`,
+          { url }
+        );
       }
       throw error;
     }

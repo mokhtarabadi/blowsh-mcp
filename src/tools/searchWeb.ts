@@ -2,8 +2,23 @@ import { load } from "cheerio";
 import axios from "axios";
 import { browshManager } from "../browshManager.js";
 import { assertSafeUrl } from "../ssrf.js";
-import { FetchError } from "../errors.js";
+import { FetchError, createDeadlineError, isDeadlineHitError } from "../errors.js";
 import { fetchWeb } from "./fetchWeb.js";
+
+/**
+ * Pure precedence rule for an empty merged result under a deadline.
+ * Exported for tests. Returns true only when the global deadline fired
+ * (signal aborted) AND nothing usable was collected — this is a
+ * deadline.hit, never an ordinary empty result.
+ */
+export function isEmptyResultDeadline(
+  aborted: boolean,
+  mergedCount: number,
+  hasInstantAnswer: boolean,
+  deadlineMs?: number
+): boolean {
+  return !!deadlineMs && aborted && mergedCount === 0 && !hasInstantAnswer;
+}
 
 export interface SearchResult {
   title: string;
@@ -548,6 +563,15 @@ async function searchSingleQuery(
 
     let merged = mergeResults(engineResults);
 
+    // D3: the inner deadline abort converts slow engines into fulfilled [].
+    // An empty merge under a fired global deadline is deadline.hit — throw
+    // the typed error so the outer race runs the cheap fallback instead of
+    // resolving a bare [] that is indistinguishable from genuine no-results.
+    // Must precede the news/entity simplify-retry (retrying would exceed budget).
+    if (isEmptyResultDeadline(controller.signal.aborted, merged.length, !!instantAnswer, deadlineMs)) {
+      throw createDeadlineError(`deadline.hit: search timed out after ${deadlineMs}ms (query: ${query})`);
+    }
+
     // Empty-only fallback: brittle vertical queries (long news/entity strings)
     // retry once simplified, then once as plain web. Non-empty first passes
     // are untouched, so the simple-query baseline cannot regress.
@@ -632,8 +656,15 @@ export async function searchWeb(
 
     // Variants: search each query in parallel, then merge per-query result sets with dedup across variants
     // For separated sets, we merge but preserve variant provenance in snippet? We merge flat for backward compat.
+    // D3: a per-query deadline.hit must propagate (outer race runs the cheap
+    // fallback); swallowing it into [] would re-introduce the bare-[] bug.
     const perQueryResults = await Promise.all(
-      queries.map((q) => searchSingleQuery(q, max, currentPage, false, resolvedIntent, deadlineMs).catch(() => [] as SearchResult[]))
+      queries.map((q) =>
+        searchSingleQuery(q, max, currentPage, false, resolvedIntent, deadlineMs).catch((e: unknown) => {
+          if (isDeadlineHitError(e)) throw e;
+          return [] as SearchResult[];
+        })
+      )
     );
 
     // Merge across variants: dedup by URL, keep highest consensus
@@ -658,9 +689,7 @@ export async function searchWeb(
 
   if (deadlineMs && deadlineMs > 0) {
     const timeoutMs = Math.max(500, Math.min(600_000, deadlineMs));
-    const deadlineError = new FetchError(`deadline.hit: search timed out after ${timeoutMs}ms (query: ${query})`, {});
-    // Attach stable code for branching
-    (deadlineError as unknown as { code?: string }).code = "deadline.hit";
+    const deadlineError = createDeadlineError(`deadline.hit: search timed out after ${timeoutMs}ms (query: ${query})`);
     return Promise.race([
       run(),
       new Promise<SearchResult[]>((_, reject) => setTimeout(() => reject(deadlineError), timeoutMs)),
@@ -668,7 +697,7 @@ export async function searchWeb(
       // Deadline with zero data is the worst failure mode: try a cheap
       // browser-free fallback (plain HTTP engine pages) and return whatever
       // it yields as partial results. Only throw when fallback is empty too.
-      if ((e as unknown as { code?: string })?.code !== "deadline.hit") throw e;
+      if (!isDeadlineHitError(e)) throw e;
       try {
         const partial = await fetchCheapFallback(query, max);
         if (partial.length > 0) {

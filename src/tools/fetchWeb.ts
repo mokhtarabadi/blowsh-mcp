@@ -17,7 +17,7 @@ import {
   stripMedia,
   applyOffset,
 } from "../extract.js";
-import { FetchError } from "../errors.js";
+import { FetchError, createDeadlineError } from "../errors.js";
 import {
   detectGuard,
   guardTrailer,
@@ -127,35 +127,81 @@ interface WaybackSnapshot {
   url: string;
 }
 
+export type WaybackOutcomeKind = "hit" | "no-snapshot" | "snapshot-fetch-failed" | "api-error";
+
+export interface WaybackOutcome {
+  kind: WaybackOutcomeKind;
+  snapshot?: WaybackSnapshot;
+}
+
+/**
+ * Pure classifier for the archive.org availability payload. Exported for tests.
+ * Returns "hit" only when the API reports an available snapshot URL; the
+ * snapshot download itself still happens in fetchWaybackSnapshot.
+ */
+export function classifyWaybackAvailability(data: unknown): WaybackOutcomeKind {
+  const closest = (data as { archived_snapshots?: { closest?: { available: boolean; url: string } } })?.archived_snapshots?.closest;
+  if (!closest?.available || !closest.url) return "no-snapshot";
+  if (!closest.url.includes("web.archive.org")) return "no-snapshot";
+  return "hit";
+}
+
+/**
+ * Pure snapshot-body gate. Exported for tests. A downloaded snapshot counts
+ * as a hit only when the body is usable (>=200 chars); anything else is
+ * "snapshot-fetch-failed" — never "api-error" (transport/HTTP rejections
+ * land here via the nested catch in fetchWaybackOutcome).
+ */
+export function classifySnapshotBody(htmlLength: number): WaybackOutcomeKind {
+  return htmlLength >= 200 ? "hit" : "snapshot-fetch-failed";
+}
+
 async function fetchWaybackSnapshot(originalUrl: string): Promise<WaybackSnapshot | null> {
+  const outcome = await fetchWaybackOutcome(originalUrl);
+  return outcome.snapshot ?? null;
+}
+
+async function fetchWaybackOutcome(originalUrl: string): Promise<WaybackOutcome> {
   try {
     // SSRF check for the Wayback API host (public, safe)
     await assertSafeUrl("https://web.archive.org/");
     const api = `https://archive.org/wayback/available?url=${encodeURIComponent(originalUrl)}`;
     const res = await axios.get(api, { timeout: 7000, maxRedirects: 3 });
-    const closest = (res.data as { archived_snapshots?: { closest?: { available: boolean; url: string; timestamp: string; status: string } } })?.archived_snapshots?.closest;
-    if (!closest?.available || !closest.url) return null;
-    // Fetch the snapshot — use id_ to get raw (un-rewritten) if possible, but the API URL already works
+    const availability = classifyWaybackAvailability(res.data);
+    if (availability !== "hit") {
+      console.error(`[fetchWeb] Wayback: no snapshot available for ${originalUrl}`);
+      return { kind: "no-snapshot" };
+    }
+    const closest = (res.data as { archived_snapshots: { closest: { url: string; timestamp: string } } }).archived_snapshots.closest;
+    // Fetch the snapshot in a nested boundary: axios rejects non-2xx by
+    // default, so transport/HTTP failures here must map to
+    // "snapshot-fetch-failed", not the outer "api-error" (availability API).
     const snapshotUrl: string = closest.url;
-    // Guard: snapshot URL must be web.archive.org
-    if (!snapshotUrl.includes("web.archive.org")) return null;
-    const snapRes = await axios.get(snapshotUrl, {
-      timeout: 15000,
-      maxRedirects: 5,
-      responseType: "text",
-      maxContentLength: 5 * 1024 * 1024,
-      headers: { "User-Agent": "blowsh-mcp/2.3.2" },
-    });
-    if (snapRes.status >= 400) return null;
-    const html = String(snapRes.data);
-    if (!html || html.length < 200) return null;
-    return { html, timestamp: closest.timestamp, url: snapshotUrl };
-  } catch {
-    return null;
+    try {
+      const snapRes = await axios.get(snapshotUrl, {
+        timeout: 15000,
+        maxRedirects: 5,
+        responseType: "text",
+        maxContentLength: 5 * 1024 * 1024,
+        headers: { "User-Agent": "blowsh-mcp/2.3.2" },
+      });
+      const html = String(snapRes.data);
+      if (classifySnapshotBody(html.length) !== "hit") {
+        console.error(`[fetchWeb] Wayback: snapshot body too small for ${originalUrl}`);
+        return { kind: "snapshot-fetch-failed" };
+      }
+      return { kind: "hit", snapshot: { html, timestamp: closest.timestamp, url: snapshotUrl } };
+    } catch (e) {
+      console.error(`[fetchWeb] Wayback: snapshot fetch failed for ${originalUrl}: ${e instanceof Error ? e.message : String(e)}`);
+      return { kind: "snapshot-fetch-failed" };
+    }
+  } catch (e) {
+    console.error(`[fetchWeb] Wayback: api-error for ${originalUrl}: ${e instanceof Error ? e.message : String(e)}`);
+    return { kind: "api-error" };
   }
 }
 
-function isHardFailure(e: unknown): boolean {
+export function isHardFailure(e: unknown): boolean {
   if (e instanceof FetchError) {
     const msg = e.message.toLowerCase();
     // 4xx/5xx or explicit status code
@@ -594,11 +640,12 @@ function hostOf(url: string): string {
 }
 
 async function fetchWebNoGuard(opts: FetchWebOptions): Promise<string> {
-  // deadline_ms wrapper — honest deadline.hit error, never silent hang
+  // deadline_ms wrapper — honest deadline.hit error, never silent hang.
+  // NOTE: a deadline.hit message contains "timed out", not "timeout", so
+  // isHardFailure() stays false and archive=auto never rescues it (documented).
   if (opts.deadline_ms && opts.deadline_ms > 0) {
     const ms = Math.max(500, Math.min(600_000, opts.deadline_ms));
-    const deadlineError = new FetchError(`deadline.hit: fetch timed out after ${ms}ms for ${opts.url}`, { url: opts.url });
-    (deadlineError as unknown as { code?: string }).code = "deadline.hit";
+    const deadlineError = createDeadlineError(`deadline.hit: fetch timed out after ${ms}ms for ${opts.url}`, opts.url);
     return Promise.race([
       fetchWebInner(opts),
       new Promise<string>((_, reject) => setTimeout(() => reject(deadlineError), ms)),

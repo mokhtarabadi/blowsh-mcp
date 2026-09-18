@@ -42,7 +42,7 @@ const tools = [
         toc: { type: "boolean", description: "true = heading outline only, no body text. Use to read structure then target with section." },
         section: { type: "string", description: "Heading name (substring, case-insensitive): return only that section. Use after toc." },
         must_contain: { type: "string", description: "Probe mode: verify the page mentions a string/pattern WITHOUT loading full content into context. Returns MATCH/NO-MATCH + up to 3 excerpts. Case-insensitive substring, or /regex/ (e.g. \"/CVE-2026-\\d+/\"). Full fetch still happens internally; only output collapses." },
-        archive: { type: "string", enum: ["auto", "only", "off"], description: "Wayback resurrection: auto (default when set): on hard failure (404/paywall) serve nearest archived snapshot labeled with date; only: skip live fetch, go straight to archive; off: never." },
+        archive: { type: "string", enum: ["auto", "only", "off"], description: "Wayback resurrection: auto (default when set): on hard failure (404/paywall/timeout/network) serve nearest archived snapshot labeled with date; when no snapshot exists the original error is rethrown unchanged; only: skip live fetch, go straight to archive; off: never." },
         stitch: { type: "boolean", description: "Multi-page articles: follow rel=next and return WHOLE article in one call (up to 6 parts / 48k chars) with *(part N)* markers, same-host only." },
         deadline_ms: { type: "number", description: "Hard time budget in ms (500-600000). On expiry: honest deadline.hit error, never a silent hang." },
         tier: { type: "string", enum: ["auto", "1", "2"], description: "auto (default): HTTP first, auto-escalates to browser. \"1\": HTTP only (no browser). \"2\": browser directly (slower, skips HTTP)." },
@@ -61,7 +61,7 @@ const tools = [
       "Search the web through rendered search engines and return ranked results (title, url, snippet). " +
       "Engines: DuckDuckGo HTML, Bing, Brave, Mojeek (concurrently) fused by cross-engine consensus. " +
       "Use to discover pages, then feed URLs to fetch_web/extract_links. " +
-      "DonSeTch-parity: `query_variants` (up to 2 alternate formulations, searched in parallel), `intent` (auto/web/code/paper/news/entity selects verticals: GitHub, Wikipedia, arXiv, HN), `deadline_ms` (hard budget, honest deadline error).",
+      "DonSeTch-parity: `query_variants` (up to 2 alternate formulations, searched in parallel), `intent` (auto/web/code/paper/news/entity selects verticals: GitHub, Wikipedia, arXiv, HN), `deadline_ms` (hard budget: on expiry with zero data returns cheap-fallback partials or an honest deadline.hit error, never a bare empty result).",
     inputSchema: {
       type: "object",
       properties: {
@@ -96,7 +96,8 @@ const tools = [
     title: "Fetch multiple web pages",
     description:
       "Fetch up to 10 URLs in one call, reusing the render cache. Returns per-URL results; a failing " +
-      "URL does not fail the whole batch.",
+      "URL does not fail the whole batch. deadline_ms is a per-item budget. focus/toc/section/archive/stitch " +
+      "and other single-fetch options are not supported in batch.",
     inputSchema: {
       type: "object",
       properties: {
@@ -182,6 +183,7 @@ const selectors = {
     selector: z.string().optional(),
     max_chars: z.number().int().min(100).max(2_000_000).optional(),
     wait_ms: z.number().int().min(0).max(60_000).optional(),
+    deadline_ms: z.number().int().min(500).max(600_000).optional(),
   }),
   crawl_web: z.object({
     url: z.string(),
@@ -228,8 +230,8 @@ async function route(name: ToolName, args: unknown): Promise<string> {
       return JSON.stringify(await extractLinks(url, limit), null, 2);
     }
     case "fetch_web_batch": {
-      const { urls, type, selector, max_chars, wait_ms } = selectors.fetch_web_batch.parse(args);
-      return JSON.stringify(await fetchWebBatch({ urls, type, selector, max_chars, wait_ms }), null, 2);
+      const { urls, type, selector, max_chars, wait_ms, deadline_ms } = selectors.fetch_web_batch.parse(args);
+      return JSON.stringify(await fetchWebBatch({ urls, type, selector, max_chars, wait_ms, deadline_ms }), null, 2);
     }
     case "crawl_web": {
       const { url, mode, focus, max_pages, max_depth, max_total_chars, per_page_max, include_paths, exclude_paths, same_host, respect_robots, deadline_s, resume, since_last } = selectors.crawl_web.parse(args);

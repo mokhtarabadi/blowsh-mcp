@@ -47,7 +47,7 @@ size-capped via `PDF_MAX_BYTES`, default 20 MB) and piped through `pdftotext`.
 - `section="..."` → that heading's section markdown (heading + siblings until next heading of same/higher level). Throws `FetchError` if not found.
 - `focus="query"` → BM25-lite filtered markdown (only blocks scoring >0.25) with header `> Focus filter ...`; falls back to full page with `[focus: no blocks matched ...]` notice when nothing matches.
 - `must_contain="..."` → probe collapsed output: `MATCH` or `NO-MATCH` for pattern + ≤3 excerpts (`…context…`). Full fetch still happens; only output collapses (token saver ~60 vs 4k).
-- `archive="auto"` → on hard failure (404/paywall/network) serves Wayback snapshot labeled `> [archive snapshot from YYYY-MM-DD via Wayback Machine ...]`; `archive="only"` goes straight to Wayback (throws `archive.stale` if none).
+- `archive="auto"` → on hard failure (404/paywall/timeout/network) serves Wayback snapshot labeled `> [archive snapshot from YYYY-MM-DD via Wayback Machine ...]`; when no snapshot exists the original error is rethrown unchanged (miss class logged to stderr: `no snapshot available | snapshot fetch failed | api-error`); `deadline.hit` expiry is NOT rescued (not a hard failure); `archive="only"` goes straight to Wayback (throws `archive.stale` if none).
 - `stitch=true` → follows `rel=next` up to 6 parts / 48k chars, returns stitched markdown with `*(part N)*` markers; same-host only.
 - `deadline_ms` → hard budget 500-600000ms; on expiry throws `deadline.hit: fetch timed out after ...` with stable code.
 - `tier="auto"|"1"|"2"` → `auto` (default, HTTP first → browser escalate), `1` HTTP-only, `2` browser-direct (skip sniff, always Browsh).
@@ -69,7 +69,7 @@ size-capped via `PDF_MAX_BYTES`, default 20 MB) and piped through `pdftotext`.
 | `intent`         | `"auto"|"web"|"code"|"paper"|"news"|"entity"` | no | default auto (detects) — code adds GitHub, paper arXiv, news HN, entity Wikipedia |
 | `deadline_ms`    | integer | no      | 500..600_000, hard budget (honest deadline.hit error) |
 
-Notes: `page` synthesizes engine-specific offsets (DDG 20/page, Bing/Brave/Mojeek 10/page). Engines (DDG, Bing, Brave, Mojeek) render concurrently and are merged by consensus (cross-engine agreement) rather than winner-takes-all; Brave/Mojeek add coverage beyond DDG/Bing. When DDG's Instant Answer API returns an abstract, a synthetic result with `url: ""` and `title: "Instant Answer"` is prepended; it counts toward `max_results`. `enrich: true` is best-effort — a failed enrichment fetch keeps the original snippet. `query_variants` are searched in parallel (up to 3 queries including base) and merged with dedup (flat array, backwards compatible). `intent` selects verticals (code→GitHub, paper→arXiv, news→HN Algolia, entity→Wikipedia opensearch) fetched via direct axios (no Browsh). `deadline_ms` races the whole search; on expiry throws `deadline.hit`.
+Notes: `page` synthesizes engine-specific offsets (DDG 20/page, Bing/Brave/Mojeek 10/page). Engines (DDG, Bing, Brave, Mojeek) render concurrently and are merged by consensus (cross-engine agreement) rather than winner-takes-all; Brave/Mojeek add coverage beyond DDG/Bing. When DDG's Instant Answer API returns an abstract, a synthetic result with `url: ""` and `title: "Instant Answer"` is prepended; it counts toward `max_results`. `enrich: true` is best-effort — a failed enrichment fetch keeps the original snippet. `query_variants` are searched in parallel (up to 3 queries including base) and merged with dedup (flat array, backwards compatible). `intent` selects verticals (code→GitHub, paper→arXiv, news→HN Algolia, entity→Wikipedia opensearch) fetched via direct axios (no Browsh). `deadline_ms` races the whole search; on expiry throws `deadline.hit`. Precedence rule: deadline expiry with zero data returns cheap-fallback partials when available, else throws `deadline.hit` — never a bare `[]`. An aborted engine under a fired global deadline is a deadline signal, not an ordinary empty set; a per-query `deadline.hit` propagates through `query_variants` instead of being swallowed. An empty organic result set with no deadline fired stays terminal success `[]`.
 
 **Output** `text` = pretty-printed JSON array:
 
@@ -153,8 +153,11 @@ Internal de-duplication applied; `javascript:`/`mailto:`/`tel:`/`data:`/`blob:`/
 | `urls`      | string[]         | yes     | 1..10 urls         |
 | `type`      | enum (as fetch_web) | yes    |        |
 | `selector`  | string           | no      |  |
-| `max_chars` | integer          | no      |  | 
+| `max_chars` | integer          | no      |  |
 | `wait_ms`   | integer          | no      |  |
+| `deadline_ms` | integer        | no      | 500..600_000 per-item budget; slow items fail fast with `ok:false` |
+
+Batch supports only these fields — `focus/toc/section/must_contain/archive/stitch/tier/links/media/since_last/offset` stay single-fetch-only by contract. Render transport timeouts carry a transient-retry hint with URL attribution.
 
 **Output** `text` = pretty-printed JSON array, per-URL result (a single bad URL never fails the batch):
 
