@@ -81,7 +81,8 @@ Notes: `page` synthesizes engine-specific offsets (DDG 20/page, Bing/Brave/Mojee
 
 Each result carries `fetched_at` (UTC epoch milliseconds, per `docs/conventions.md`)
 so consumers can assess staleness. The synthetic Instant Answer result uses the
-same field. Engines are rendered concurrently and merged by consensus; an empty organic result set is
+same field with `url: ""` — consumers MUST accept an empty `url` (it still counts
+toward `max_results`). Engines are rendered concurrently and merged by consensus; an empty organic result set is
 terminal success `[]`. Query cache (intent-aware TTL) dedups repeats.
 
 ### 3. `crawl_web`
@@ -92,7 +93,7 @@ terminal success `[]`. Query cache (intent-aware TTL) dedups repeats.
 |------------------|-----------|----------|-------------|
 | `url`            | string    | yes      | http(s) seed, SSRF-guarded |
 | `mode`           | `"full"|"map"|"content"` | no | default full (sitemap map + content) |
-| `focus`          | string    | no       | BM25-lite topic — ranks frontier and filters pages |
+| `focus`          | string    | no       | BM25-lite topic — ranks frontier and filters pages (seed included: a non-matching seed is skipped as `focus filtered (no match)`) |
 | `max_pages`      | integer   | no       | 1..200, default 10 |
 | `max_depth`      | integer   | no       | 0..10, default 2 (0=seed only) |
 | `max_total_chars`| integer   | no       | 4000..500_000, default 60_000 |

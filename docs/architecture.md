@@ -14,6 +14,7 @@ blowsh-mcp/
 │   ├── cache.ts                    # TTL in-memory cache shared by all fetch tools
 │   ├── extract.ts                  # Main-content extraction, selector helpers, truncation + BM25 focus, toc/section, must_contain, stitch
 │   ├── errors.ts                   # FetchError + message formatting
+│   ├── guard.ts                    # Bot-guard detection (Cloudflare/Turnstile/reCAPTCHA) + per-host verdict cache + fetch logging
 │   └── tools/
 │       ├── fetchWeb.ts             # fetch_web: plain/html/markdown/pdf + selector/max_chars/wait_ms + focus/toc/section/must_contain/archive/stitch
 │       ├── extractPdf.ts           # type: pdf — SSRF-guarded download → pdftotext (size-capped)
@@ -79,6 +80,7 @@ blowsh-mcp/
 
 - `assertSafeUrl(url)`: DNS-resolves hostname; rejects loopback, private (10/8, 172.16/12, 192.168/16), link-local (169.254/16), reserved, IPv4-mapped IPv6, `localhost`. Disable via `ALLOW_PRIVATE_URLS=true`.
 - `pageCache`: in-memory TTL map (default 5 min, `CACHE_TTL_MS`).
+- `guard.ts` (bot-guard detection — extends, not duplicates, `ssrf.ts`): `detectGuard(content)` classifies page text into `GuardKind` (`captcha`, `rate-limit`, `ip-block`, `browser-check`, `consent-wall`, …); per-host verdict cache (1h TTL, 1000-entry cap); one JSON stderr line per fetch (host + guard status + duration, `GUARD_DETECT=0` kill-switch); additive HTML-comment trailer on guarded HTML only.
 
 ## 4. Data Stores
 
@@ -99,7 +101,6 @@ blowsh-mcp/
 - **Distribution:** Prebuilt image on GitHub Container Registry — `ghcr.io/mokhtarabadi/blowsh-mcp:latest` (also tagged `2.3.2`, branch, semver, and `sha-<sha>`). Pull with `docker pull ghcr.io/mokhtarabadi/blowsh-mcp:latest`.
 - **CI/CD:** GitHub Actions (`.github/workflows/docker-publish.yml`) builds the Dockerfile and pushes to ghcr on `main` pushes and `v*` tags, with a container smoke test (MCP initialize → tools/list) before the run completes.
 - **Form factor:** MCP server over stdio (no listening port). The Browsh HTTP port stays container-private.
-- **CI/CD:** none currently; verify with build + `docker build` + JSON-RPC smoke test.
 
 ## 7. Security Considerations
 
@@ -115,9 +116,12 @@ blowsh-mcp/
 
 ## 9. Future Considerations / Roadmap
 
+Prioritized (highest value / lowest risk first; deferred items marked as such):
+
+1. **SSRF allowlist enrichment** (security first: public-suffix validation, blocked TLD lists). **Owner:** Security and networking.
+2. **Reference handles (L/S) + progressToken streaming; section-level fingerprint diff** (`since_last` is naive whole-page hash only). **Owner:** MCP protocol and platform.
+3. **Domain intelligence adapters** (Reddit, npm/PyPI/crates, StackOverflow) — only minimal verticals now. **Owner:** Integrations.
+4. **Multi-tab backpressure / tab-recycling** after long sessions. **Owner:** Browser runtime.
+5. **Browser actions** (click/type/press/wait_selector/wait_text) — **deferred**: Browsh 1.8.0 HTTP mode cannot drive page interaction (vs DonSeTch ghost); needs a different browser backend. **Owner:** Browser backend research.
+
 - ~~Search pagination beyond page 10 / query-variant automation.~~ **Done in v2.3.0** (query_variants + 4-engine consensus).
-- Reference handles (L/S) for token economy; progressToken streaming; full page memory fingerprint diff (`since_last` is naive hash, not section-level diff).
-- Domain intelligence adapters (Reddit, npm/PyPI/crates, StackOverflow) — v2.3.0 has minimal verticals only.
-- Browser actions (click/type/press/wait_selector/wait_text) — not yet (Browsh HTTP mode limited vs DonSeTch ghost).
-- Multi-tab backpressure / tab-recycling after long sessions.
-- SSRF allowlist enrichment (public suffix validation, blocked TLD lists).
