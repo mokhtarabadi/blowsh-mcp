@@ -1,9 +1,9 @@
 # Task 05: Release v2.2.1 — Bug Fixes and Improvements
 
-**File:** `tasks/qa/05-release-v221-bugfixes.md`
+**File:** `tasks/completed/05-release-v221-bugfixes.md`
 **Source:** manager
 **Type:** feature
-**Status:** in-review
+**Status:** closed
 
 ## Triage Verdict (2026-09-18 — approved rebase-or-drop check)
 
@@ -83,7 +83,5 @@ Release v2.2.1 containing all verified bug fixes and improvements from Task 04 a
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-```diff
-No code changes detected or staged.
-```
+**Factual Git Diff:** Stored in Commit Hash: `ce772848c8a2a108d6674fa16f586965185fad45`
 <!-- END_GIT_DIFF -->
