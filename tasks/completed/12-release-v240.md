@@ -1,9 +1,9 @@
 # Task 12: Release v2.4.0
 
-**File:** `tasks/qa/12-release-v240.md`
+**File:** `tasks/completed/12-release-v240.md`
 **Source:** manager
 **Type:** feature
-**Status:** in-review
+**Status:** closed
 
 ## Goal
 
@@ -69,7 +69,5 @@ The task is NOT done unless ALL of the following are true (unconditional, applie
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-```diff
-No code changes detected or staged.
-```
+**Factual Git Diff:** Stored in Commit Hash: `a033d44c7af60718a3ed83c9633a4b1140a26700`
 <!-- END_GIT_DIFF -->
