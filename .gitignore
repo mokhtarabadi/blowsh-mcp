@@ -84,3 +84,6 @@ dist/
 # package-lock.json
 # Custom Context MCP reports
 context-reports/
+
+# Brain session transcripts (per-project runtime state, never committed)
+tasks/.sessions/

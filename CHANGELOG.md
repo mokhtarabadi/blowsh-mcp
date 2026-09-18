@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [2.4.0] - 2026-09-18
 
 ### Fixed
 - `search_web` **deadline expiry returning bare `[]`** (Task 10 D3): an empty engine merge under a fired global deadline now throws the typed `deadline.hit` error (shared `createDeadlineError()` helper, stable code `deadline.hit`) so the outer race runs the cheap browser-free fallback (partials) instead of resolving an empty list indistinguishable from genuine no-results; per-query `deadline.hit` propagates through `query_variants` instead of being swallowed by `.catch(() => [])`. Precedence rule documented in `docs/data_model.md`. 18 checks pass (`tests/task10-stress-fixes.ts`).

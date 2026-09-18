@@ -9,13 +9,11 @@
   ],
   "formatter": false,
   "lsp": {
-    "language-server": {
-      "typescript": {
-        "command": [
-          "typescript-language-server",
-          "--stdio"
-        ]
-      }
+    "typescript": {
+      "command": [
+        "typescript-language-server",
+        "--stdio"
+      ]
     }
   },
   "permission": {
