@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [2.5.0] - 2026-09-29
 
 ### Added
 - Legacy SSE transport: `MCP_TRANSPORT=sse` serves stateful SSE on `GET /sse` + `POST /messages?sessionId=…` plus `GET /health` (default 127.0.0.1:8108), for hosts that cannot speak streamable HTTP (deprecated upstream, kept for compatibility). Verified via Docker: SSE stream 200 + endpoint event, initialize accepted, `tools/list` returns all 5 tools over the stream.
