@@ -1,9 +1,9 @@
 # Task 13: Release v2.5.0
 
-**File:** `tasks/qa/13-release-v250.md`
+**File:** `tasks/completed/13-release-v250.md`
 **Source:** manager
 **Type:** feature
-**Status:** open
+**Status:** closed
 
 ## Goal
 
@@ -69,46 +69,10 @@ The task is NOT done unless ALL of the following are true (unconditional, applie
 
 **[2026-09-29] [REVIEW]:** Code Reviewer APPROVED, PO_REVIEW_PENDING. Release-only diff, SemVer minor correct, ZAC holds. Awaiting Manager explicit closure phrase.
 
+**[2026-09-29] [CLOSURE]:** Manager replied "Approved for closure". Moving to completed with no further code changes.
+
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-```diff
-diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 4496ca4..fa567e5 100644
---- a/CHANGELOG.md
-+++ b/CHANGELOG.md
-@@ -1,6 +1,6 @@
- # Changelog
- 
--## [Unreleased]
-+## [2.5.0] - 2026-09-29
- 
- ### Added
- - Legacy SSE transport: `MCP_TRANSPORT=sse` serves stateful SSE on `GET /sse` + `POST /messages?sessionId=…` plus `GET /health` (default 127.0.0.1:8108), for hosts that cannot speak streamable HTTP (deprecated upstream, kept for compatibility). Verified via Docker: SSE stream 200 + endpoint event, initialize accepted, `tools/list` returns all 5 tools over the stream.
-diff --git a/package.json b/package.json
-index b0fa531..1ddb4cc 100644
---- a/package.json
-+++ b/package.json
-@@ -1,6 +1,6 @@
- {
-   "name": "blowsh-mcp",
--  "version": "2.4.0",
-+  "version": "2.5.0",
-   "description": "An MCP server exposing Browsh (the JavaScript-capable terminal browser) to AIs and agents over the Model Context Protocol.",
-   "author": "Mohammad Reza Mokhtarabadi <mmokhtarabadi@gmail.com>",
-   "license": "MIT",
-diff --git a/src/server.ts b/src/server.ts
-index e066ff0..688362e 100644
---- a/src/server.ts
-+++ b/src/server.ts
-@@ -253,7 +253,7 @@ async function createServer() {
-   const server = new Server(
-     {
-       name: "blowsh-mcp",
--      version: "2.4.0",
-+      version: "2.5.0",
-     },
-     {
-       capabilities: { tools: {} },
-```
+**Factual Git Diff:** Stored in Commit Hash: `ed3c3779536770029075f3d1d96aacee26e54796`
 <!-- END_GIT_DIFF -->
