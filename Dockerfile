@@ -60,6 +60,12 @@ COPY README.md ./
 RUN mkdir -p /data/browsh-profile
 VOLUME /data/browsh-profile
 
-# No EXPOSE: Browsh's HTTP port is not configurable and must stay private.
-# Run MCP server over stdio; Browsh binds 127.0.0.1:4333 inside the container.
+# Optional singleton HTTP mode: MCP_TRANSPORT=http serves streamable HTTP on
+# MCP_PORT (default 8107); MCP_TRANSPORT=sse serves legacy SSE (default 8108).
+# Inside the container bind all interfaces
+# (MCP_HOST=0.0.0.0); lock the host side to loopback at publish time
+# (-p 127.0.0.1:8107:8107) so the port never leaves this machine.
+EXPOSE 8107 8108
+
+# Default: MCP server over stdio; Browsh binds 127.0.0.1:4333 inside the container.
 CMD ["node", "dist/server.js"]

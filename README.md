@@ -59,6 +59,27 @@ docker run --rm -i ghcr.io/mokhtarabadi/blowsh-mcp:latest
 > interactive and pipe requests, or point your MCP client at it (see
 > [AI Client Configuration](#mcp-protocol-ai-client-configuration) below).
 
+### Singleton mode (one shared HTTP instance)
+
+For setups where many agent sessions share one server (e.g. opencode
+`type: remote`), run a single supervised container instead of one stdio
+process per session:
+
+```sh
+docker volume create blowsh-profile
+docker run -d --name blowsh-singleton --restart unless-stopped \
+  -p 127.0.0.1:8107:8107 \
+  -v blowsh-profile:/data/browsh-profile \
+  -e MCP_TRANSPORT=http -e MCP_HOST=0.0.0.0 -e MCP_PORT=8107 \
+  blowsh-mcp:latest
+```
+
+Notes: `MCP_HOST=0.0.0.0` is required inside the container (loopback there is
+not reachable from the host); the `-p 127.0.0.1:` prefix keeps the published
+port on loopback so it never leaves the machine. Health probe:
+`GET http://127.0.0.1:8107/health`. MCP endpoint:
+`POST http://127.0.0.1:8107/mcp` (stateless streamable HTTP).
+
 ---
 
 ## Example Usage
@@ -260,7 +281,9 @@ Set these via `.env` (loaded automatically) or the environment:
 | `BROWSH_IDLE_TIMEOUT_MS`    | `600000`      | Idle time in ms before the browser process is killed (10 min).           |
 | `CACHE_TTL_MS`              | `300000`      | In-memory render cache TTL (ms).                                          |
 | `ALLOW_PRIVATE_URLS`        | `false`       | Set `true` to disable the SSRF guard for loopback/private targets.        |
-| `MCP_TRANSPORT`             | `stdio`       | Transport type (only `stdio` implemented).                                |
+| `MCP_TRANSPORT`             | `stdio`       | Transport type: `stdio` (default), `http` (stateless streamable HTTP on `/mcp`; see Singleton mode below), or `sse` (legacy stateful SSE on `/sse` + `/messages`, default port `8108`, for hosts that cannot speak streamable HTTP; deprecated upstream, kept for compatibility). |
+| `MCP_HOST`                  | `127.0.0.1`   | Bind address for HTTP/SSE mode. Use `0.0.0.0` inside Docker (lock the host side with `-p 127.0.0.1:<port>:<port>`). |
+| `MCP_PORT`                  | `8107`        | Port for HTTP/SSE mode (`8108` default under `MCP_TRANSPORT=sse`).        |
 | `NODE_ENV`                  | `production`  | Node environment.                                                        |
 
 ---

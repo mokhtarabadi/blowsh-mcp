@@ -2,6 +2,9 @@ import dotenv from "dotenv";
 import { z } from "zod";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import express, { type Request, type Response } from "express";
 import { browshManager } from "./browshManager.js";
 import { toFetchErrorMessage } from "./errors.js";
 import {
@@ -246,7 +249,7 @@ async function route(name: ToolName, args: unknown): Promise<string> {
   }
 }
 
-async function runServer() {
+async function createServer() {
   const server = new Server(
     {
       name: "blowsh-mcp",
@@ -273,6 +276,165 @@ async function runServer() {
       return errorResponse(error);
     }
   });
+
+  return server;
+}
+
+function resolvePort(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === "") {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    console.error(`Invalid MCP_PORT="${raw}", falling back to ${fallback}`);
+    return fallback;
+  }
+  return parsed;
+}
+
+async function runHttpServer() {
+  const host = process.env.MCP_HOST ?? "127.0.0.1";
+  const port = resolvePort(process.env.MCP_PORT, 8107);
+  const app = express();
+  app.use(express.json({ limit: "4mb" }));
+
+  // Stateless streamable HTTP: one transport per request, shared tool
+  // backends (browshManager singleton) underneath. Safe for concurrent
+  // sessions — no per-client state is kept.
+  app.post("/mcp", async (req: Request, res: Response) => {
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+    const server = await createServer();
+    res.on("close", () => {
+      void transport.close().catch(() => undefined);
+      void server.close().catch(() => undefined);
+    });
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      console.error("Error handling MCP request:", error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal server error" },
+          id: null,
+        });
+      }
+    }
+  });
+
+  app.get("/mcp", async (_req: Request, res: Response) => {
+    res.status(405).json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Method not allowed (stateless mode)." },
+      id: null,
+    });
+  });
+
+  app.delete("/mcp", async (_req: Request, res: Response) => {
+    res.status(405).json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Method not allowed (stateless mode)." },
+      id: null,
+    });
+  });
+
+  app.get("/health", (_req: Request, res: Response) => {
+    res.status(200).json({ status: "ok", transport: "streamable-http" });
+  });
+
+  await new Promise<void>((resolve) => {
+    app.listen(port, host, () => {
+      console.error(`blowsh-mcp MCP server running on streamable HTTP at http://${host}:${port}/mcp`);
+      resolve();
+    });
+  });
+}
+
+async function runSseServer() {
+  const host = process.env.MCP_HOST ?? "127.0.0.1";
+  const port = resolvePort(process.env.MCP_PORT, 8108);
+  const app = express();
+  app.use(express.json({ limit: "4mb" }));
+  const transports: Record<string, SSEServerTransport> = {};
+
+  // Legacy SSE: one stateful transport per client session. Kept for
+  // clients that cannot speak streamable HTTP (deprecated upstream
+  // in the MCP SDK, but still required by some hosts).
+  app.get("/sse", async (_req: Request, res: Response) => {
+    const server = await createServer();
+    try {
+      const transport = new SSEServerTransport("/messages", res);
+      transports[transport.sessionId] = transport;
+      res.on("close", () => {
+        delete transports[transport.sessionId];
+        void server.close().catch(() => undefined);
+      });
+      await server.connect(transport);
+    } catch (error) {
+      console.error("Error handling SSE session:", error);
+      void server.close().catch(() => undefined);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal server error" },
+          id: null,
+        });
+      }
+    }
+  });
+
+  app.post("/messages", async (req: Request, res: Response) => {
+    const sessionId = String(req.query.sessionId ?? "");
+    const transport = transports[sessionId];
+    if (!transport) {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "No such SSE session." },
+        id: null,
+      });
+      return;
+    }
+    try {
+      await transport.handlePostMessage(req, res, req.body);
+    } catch (error) {
+      console.error("Error handling SSE message:", error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal server error" },
+          id: null,
+        });
+      }
+    }
+  });
+
+  app.get("/health", (_req: Request, res: Response) => {
+    res.status(200).json({ status: "ok", transport: "sse" });
+  });
+
+  await new Promise<void>((resolve) => {
+    app.listen(port, host, () => {
+      console.error(`blowsh-mcp MCP server running on legacy SSE at http://${host}:${port}/sse`);
+      resolve();
+    });
+  });
+}
+
+async function runServer() {
+  const transportMode = (process.env.MCP_TRANSPORT ?? "stdio").toLowerCase();
+  if (transportMode === "http" || transportMode === "streamable-http") {
+    await runHttpServer();
+    return;
+  }
+  if (transportMode === "sse") {
+    await runSseServer();
+    return;
+  }
+
+  const server = await createServer();
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

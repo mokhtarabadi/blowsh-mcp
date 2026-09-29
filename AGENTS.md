@@ -9,7 +9,8 @@ blowsh-mcp is a Model Context Protocol (MCP) server that exposes Browsh — a fu
 ## Setup & Dev Commands
 
 - Build: `npm run build` (tsc, outputs `dist/`)
-- Start: `node dist/server.js` (stdio MCP transport)
+- Start: `node dist/server.js` (stdio MCP transport, default)
+- Singleton HTTP: `MCP_TRANSPORT=http MCP_HOST=0.0.0.0 MCP_PORT=8107 node dist/server.js` (in Docker; host publish stays `-p 127.0.0.1:8107:8107`)
 - Dev: `npm run dev` (tsx watch-less runner)
 - Docker build: `docker build -t blowsh-mcp:latest .`
 - Docker run (MCP over stdio — MUST include `-i`): `docker run --rm -i blowsh-mcp:latest`

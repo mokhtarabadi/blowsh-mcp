@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Legacy SSE transport: `MCP_TRANSPORT=sse` serves stateful SSE on `GET /sse` + `POST /messages?sessionId=…` plus `GET /health` (default 127.0.0.1:8108), for hosts that cannot speak streamable HTTP (deprecated upstream, kept for compatibility). Verified via Docker: SSE stream 200 + endpoint event, initialize accepted, `tools/list` returns all 5 tools over the stream.
+- Native streamable-HTTP transport (Task 10): `MCP_TRANSPORT=http` serves stateless streamable HTTP on `/mcp` plus `GET /health`; `MCP_HOST`/`MCP_PORT` (default 127.0.0.1:8107). `src/server.ts` refactored into a `createServer()` factory; stdio stays the byte-identical default. New `express` dependency. Singleton recipe: one `--restart unless-stopped` container with `-p 127.0.0.1:8107:8107` shared by all sessions via opencode `type: remote`. Verified: containerized initialize + tools/list 200, end-to-end tool call through the singleton.
+
+### Fixed
+- Singleton hardening: invalid `MCP_PORT` falls back to the transport default with an error log instead of passing `NaN` to listen; SSE `GET /sse` and `POST /messages` wrapped in try/catch with safe 500 JSON; Dockerfile exposes 8107 + 8108; `.env.example` and architecture docs now document `MCP_TRANSPORT`/`MCP_HOST`/`MCP_PORT`.
+
 ## [2.4.0] - 2026-09-18
 
 ### Fixed
