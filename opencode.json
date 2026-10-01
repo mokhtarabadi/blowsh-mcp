@@ -3,6 +3,7 @@
   "default_agent": "cognitive-executor",
   "instructions": [
     "AGENTS.md",
+    "DESIGN.md",
     "docs/architecture.md",
     "docs/data_model.md",
     "docs/conventions.md"
@@ -18,7 +19,7 @@
   },
   "permission": {
     "blowsh_*": "allow",
-    "bash": {
+    "shell": {
       "git add": "deny",
       "git add *": "deny",
       "git checkout": "deny",
