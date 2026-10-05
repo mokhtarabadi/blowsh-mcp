@@ -84,11 +84,11 @@ function decodeRedirect(href?: string): string | undefined {
     return href;
   }
 
-  // Google: https://www.google.com/url?q=<encoded-url>&...
-  if (href.includes("google.com/url")) {
+  // Google: https://www.google.com/url?q=<encoded-url>&... or root-relative /url?q=<encoded-url>...
+  if (href.includes("google.com/url") || href.startsWith("/url?")) {
     try {
-      const u = new URL(href);
-      const target = u.searchParams.get("q");
+      const u = new URL(href, "https://www.google.com");
+      const target = u.searchParams.get("q") || u.searchParams.get("url");
       if (target && /^https?:\/\//i.test(target)) return target;
     } catch { /* fall through */ }
     return href;
@@ -104,6 +104,17 @@ function absolute(href: string | undefined, base: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Google search URL (10 results per page, start param). Attempted first; often robot-blocked. */
+function googleSearchUrl(query: string, page: number): string {
+  const start = (page - 1) * 10;
+  return `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&start=${start}`;
+}
+
+/** Startpage search URL (Google-quality proxy, 10 results per page). */
+function startpageSearchUrl(query: string, page: number): string {
+  return `https://www.startpage.com/sp/search?query=${encodeURIComponent(query)}&page=${page}`;
 }
 
 /** DuckDuckGo HTML URL for a given result page (20 results per page). */
@@ -222,6 +233,102 @@ function parseMojeek(html: string, baseUrl: string): SearchResult[] {
       if (results.length < 10) results.push({ title, url: abs, snippet, fetched_at: 0 });
     });
   }
+  return results.slice(0, 10);
+}
+
+/**
+ * Detects bot-guard block pages (Google unusual-traffic, Startpage verify,
+ * Marginalia bot-activity). Checks page title, headings, and structural
+ * CAPTCHA elements, avoiding false positives on organic search snippets.
+ */
+export function isBlockedPage(html: string): boolean {
+  const $ = load(html);
+  const hasOrganicResults = $("div.g, div.tF2Cxc, .result, .w-gl__result, li.b_algo, .b_algo").length > 0;
+
+  // Organic results present: page is a genuine results page, never a block —
+  // snippet/title text may legitimately mention block phrases (false-positive guard).
+  if (hasOrganicResults) return false;
+
+  const title = $("title").text().toLowerCase().trim();
+  const h1 = $("h1").text().toLowerCase().trim();
+
+  // Explicit title / h1 indicators of block/challenge
+  if (
+    title.includes("unusual traffic") ||
+    title.includes("verifying your request") ||
+    title.includes("aggressive bot activity") ||
+    title.includes("robot check") ||
+    title.includes("sorry...") ||
+    title.includes("attention required") ||
+    h1.includes("unusual traffic") ||
+    h1.includes("verifying your request") ||
+    h1.includes("aggressive bot activity")
+  ) {
+    return true;
+  }
+
+  // Structural challenge signals (captcha forms, challenge redirects)
+  const forms = $('form[action*="Captcha"], form#captcha-form, form[action*="sorry"]');
+  if (forms.length > 0) return true;
+
+  const recaptcha = $('[data-sitekey], .g-recaptcha, .cf-turnstile, #captcha-form');
+  if (recaptcha.length > 0) return true;
+
+  // Dedicated block markers (no organic containers present at this point)
+  const l = html.toLowerCase();
+  if (
+    l.includes("/sorry/index") ||
+    l.includes("our systems have detected unusual traffic") ||
+    l.includes("please solve this challenge to continue")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/** Parses Google organic results (best-effort across layouts). */
+export function parseGoogle(html: string, baseUrl: string): SearchResult[] {
+  if (isBlockedPage(html)) return [];
+  const $ = load(html);
+  const results: SearchResult[] = [];
+  $("div.g, div.tF2Cxc").each((_, el) => {
+    const a = $(el).find("a").first();
+    const title = $(el).find("h3").first().text().trim() || a.text().trim();
+    const snippet = $(el).find("div.VwiC3b, div.IsZvec, span.st").first().text().trim();
+    const href = decodeRedirect(a.attr("href"));
+    const abs = absolute(href, baseUrl);
+    if (!abs || !title) return;
+    if (abs.includes("google.com/")) return;
+    results.push({ title, url: abs, snippet, fetched_at: 0 });
+  });
+  if (results.length === 0) {
+    $("a[href*='/url?q=']").each((_, el) => {
+      const href = decodeRedirect($(el).attr("href"));
+      const abs = absolute(href, baseUrl);
+      if (!abs || abs.includes("google.com/")) return;
+      const title = $(el).text().trim();
+      if (title.length < 8 || title.length > 200) return;
+      if (results.length < 10) results.push({ title, url: abs, snippet: "", fetched_at: 0 });
+    });
+  }
+  return results.slice(0, 10);
+}
+
+/** Parses Startpage results (Google-quality proxy, best-effort). */
+export function parseStartpage(html: string, baseUrl: string): SearchResult[] {
+  if (isBlockedPage(html)) return [];
+  const $ = load(html);
+  const results: SearchResult[] = [];
+  $(".result, .w-gl__result, div.result-item").each((_, el) => {
+    const a = $(el).find("a.result-title, a.w-gl__result-title, a").first();
+    const title = a.text().trim();
+    const snippet = $(el).find("p.result-snippet, p.w-gl__description, p").first().text().trim();
+    const abs = absolute(a.attr("href"), baseUrl);
+    if (!abs || !title) return;
+    if (abs.includes("startpage.com")) return;
+    results.push({ title, url: abs, snippet, fetched_at: 0 });
+  });
   return results.slice(0, 10);
 }
 
@@ -431,6 +538,7 @@ async function renderEngine(
   try {
     await browshManager.ensureStarted();
     const dom = await browshManager.fetchDom(engine.url, signal);
+    if (isBlockedPage(dom)) return [];
     return engine.parse(dom);
   } catch (e) {
     // An aborted sibling is not an error — the other engine already won.
@@ -515,12 +623,8 @@ async function searchSingleQuery(
     return cached.results.slice(0, maxResults);
   }
 
-  const engines: Array<{ url: string; parse: (html: string) => SearchResult[] }> = [
-    { url: ddgSearchUrl(query, page), parse: (html) => parseDuckDuckGo(html, "https://duckduckgo.com/") },
-    { url: bingSearchUrl(query, page), parse: (html) => parseBing(html, "https://www.bing.com/") },
-    { url: braveSearchUrl(query, page), parse: (html) => parseBrave(html, "https://search.brave.com/") },
-    { url: mojeekSearchUrl(query, page), parse: (html) => parseMojeek(html, "https://www.mojeek.com/") },
-  ];
+  // Tiered engines are defined inline below (Tier 1: Google, Tier 2:
+  // Startpage, Tier 3: 4-engine consensus pool) — no concurrent 6-engine fan-out.
 
   // Verticals per intent (direct axios, no Browsh — friendly APIs)
   const verticalPromises: Promise<SearchResult[]>[] = [];
@@ -534,31 +638,78 @@ async function searchSingleQuery(
   const deadlineTimer = deadlineMs ? setTimeout(() => controller.abort(), deadlineMs) : null;
 
   try {
-    const [instantAnswer, engineOutcomes, verticalResults] = await Promise.all([
+    // 1. Kick off direct-HTTP calls in parallel (no Browsh mutex contention)
+    const [instantAnswer, verticalResults] = await Promise.all([
       fetchInstantAnswer(query),
-      Promise.allSettled(
-        engines.map(async (engine) => {
-          const results = await renderEngine(engine, controller.signal);
-          return results;
-        })
-      ),
       Promise.all(verticalPromises).then((arr) => arr.flat()).catch(() => [] as SearchResult[]),
     ]);
 
     const engineResults: SearchResult[][] = [];
-    let anyFulfilled = false;
-    for (const o of engineOutcomes) {
-      if (o.status === "fulfilled") {
-        anyFulfilled = true;
-        if (o.value.length > 0) engineResults.push(o.value);
+
+    // 2. Tier 1: Google (Primary attempt)
+    // If Google succeeds and returns clean results, short-circuit immediately.
+    const googleEngine = {
+      url: googleSearchUrl(query, page),
+      parse: (html: string) => parseGoogle(html, "https://www.google.com/"),
+    };
+
+    try {
+      const googleRes = await renderEngine(googleEngine, controller.signal);
+      if (googleRes.length > 0) {
+        engineResults.push(googleRes);
+      }
+    } catch (e) {
+      if (!axios.isCancel(e) && !(axios.isAxiosError(e) && e.code === "ERR_CANCELED")) {
+        console.error(`[searchWeb] Google attempt failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
+
+    // 3. Tier 2: Startpage (Google-quality proxy fallback)
+    // If Google was robot-blocked or yielded 0 results, try Startpage.
+    if (engineResults.length === 0 && !controller.signal.aborted) {
+      const startpageEngine = {
+        url: startpageSearchUrl(query, page),
+        parse: (html: string) => parseStartpage(html, "https://www.startpage.com/"),
+      };
+      try {
+        const startpageRes = await renderEngine(startpageEngine, controller.signal);
+        if (startpageRes.length > 0) {
+          engineResults.push(startpageRes);
+        }
+      } catch (e) {
+        if (!axios.isCancel(e) && !(axios.isAxiosError(e) && e.code === "ERR_CANCELED")) {
+          console.error(`[searchWeb] Startpage attempt failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+
+    // 4. Tier 3: 4-Engine Consensus pool fallback (Brave, Mojeek, Bing, DDG)
+    // Only triggered if both Google and Startpage failed or were blocked.
+    if (engineResults.length === 0 && !controller.signal.aborted) {
+      const fallbackEngines = [
+        { url: braveSearchUrl(query, page), parse: (html: string) => parseBrave(html, "https://search.brave.com/") },
+        { url: mojeekSearchUrl(query, page), parse: (html: string) => parseMojeek(html, "https://www.mojeek.com/") },
+        { url: bingSearchUrl(query, page), parse: (html: string) => parseBing(html, "https://www.bing.com/") },
+        { url: ddgSearchUrl(query, page), parse: (html: string) => parseDuckDuckGo(html, "https://duckduckgo.com/") },
+      ];
+
+      const poolOutcomes = await Promise.allSettled(
+        fallbackEngines.map(async (engine) => renderEngine(engine, controller.signal))
+      );
+
+      for (const o of poolOutcomes) {
+        if (o.status === "fulfilled" && o.value.length > 0) {
+          engineResults.push(o.value);
+        }
+      }
+    }
+
     if (verticalResults.length > 0) engineResults.push(verticalResults);
 
-    if (engineResults.length === 0 && !anyFulfilled) {
-      const reason = engineOutcomes.map((o) => o.status === "rejected" ? o.reason : null).find((r) => r !== null);
-      if (reason instanceof Error) throw reason;
-      throw new FetchError(`No results found for query: ${query}`);
+    if (engineResults.length === 0 && !instantAnswer) {
+      if (isEmptyResultDeadline(controller.signal.aborted, 0, false, deadlineMs)) {
+        throw createDeadlineError(`deadline.hit: search timed out after ${deadlineMs}ms (query: ${query})`);
+      }
     }
 
     let merged = mergeResults(engineResults);

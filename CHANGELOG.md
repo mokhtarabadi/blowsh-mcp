@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `search_web` tiered keyless fallback chain: Google attempted first with robot-block detection and short-circuits on clean results (~6x speedup); Startpage proxy second; 4-engine consensus pool (Brave, Mojeek, Bing, DDG) third. Relative `/url?q=` Google redirects decoded. `isBlockedPage` hardened against snippet-text false positives. No new env keys.
+
 ## [2.5.0] - 2026-09-29
 
 ### Added
