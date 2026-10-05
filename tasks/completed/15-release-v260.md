@@ -1,9 +1,9 @@
 # Task 15: Release v2.6.0
 
-**File:** `tasks/qa/15-release-v260.md`
+**File:** `tasks/completed/15-release-v260.md`
 **Source:** manager
 **Type:** feature
-**Status:** in-progress
+**Status:** closed
 
 ## Goal
 
@@ -69,46 +69,10 @@ The task is NOT done unless ALL of the following are true (unconditional, applie
 
 **[2026-10-05] [EXECUTION-DETECTED]:** Memory-first release per Manager order. Searched memory (no local hits for release/archive; standing rulings found via manager decisions), loaded task-generator, archive-tasks, versioning-and-release, github skills. Release plan v2.6.0 approved by Manager. Archived tasks 13 and 14.
 
+**[2026-10-05] [CLOSURE]:** Auto-close authorized by Manager order. Bumped to 2.6.0, CHANGELOG stamped, build exit 0. Moving to completed and committing via atomic routine. Push and tag stay Manager-owned.
+
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-```diff
-diff --git a/CHANGELOG.md b/CHANGELOG.md
-index f716f58..1c6bc3a 100644
---- a/CHANGELOG.md
-+++ b/CHANGELOG.md
-@@ -1,6 +1,6 @@
- # Changelog
- 
--## [Unreleased]
-+## [2.6.0] - 2026-10-05
- 
- ### Added
- - `search_web` tiered keyless fallback chain: Google attempted first with robot-block detection and short-circuits on clean results (~6x speedup); Startpage proxy second; 4-engine consensus pool (Brave, Mojeek, Bing, DDG) third. Relative `/url?q=` Google redirects decoded. `isBlockedPage` hardened against snippet-text false positives. No new env keys.
-diff --git a/package.json b/package.json
-index 1ddb4cc..f199c3a 100644
---- a/package.json
-+++ b/package.json
-@@ -1,6 +1,6 @@
- {
-   "name": "blowsh-mcp",
--  "version": "2.5.0",
-+  "version": "2.6.0",
-   "description": "An MCP server exposing Browsh (the JavaScript-capable terminal browser) to AIs and agents over the Model Context Protocol.",
-   "author": "Mohammad Reza Mokhtarabadi <mmokhtarabadi@gmail.com>",
-   "license": "MIT",
-diff --git a/src/server.ts b/src/server.ts
-index 688362e..3d5af80 100644
---- a/src/server.ts
-+++ b/src/server.ts
-@@ -253,7 +253,7 @@ async function createServer() {
-   const server = new Server(
-     {
-       name: "blowsh-mcp",
--      version: "2.5.0",
-+      version: "2.6.0",
-     },
-     {
-       capabilities: { tools: {} },
-```
+**Factual Git Diff:** Stored in Commit Hash: `cc1f9d9e6bed0f941d1917c940662db545dba60d`
 <!-- END_GIT_DIFF -->
