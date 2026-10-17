@@ -1,9 +1,9 @@
 # Task 17: Resolve Clock-injection vs Date.now convention gap
 
-**File:** `tasks/qa/17-clock-convention-gap.md`
+**File:** `tasks/completed/17-clock-convention-gap.md`
 **Source:** manager
 **Type:** docs
-**Status:** open
+**Status:** closed
 
 ## Goal
 
@@ -123,3 +123,8 @@ index eed5693..11d0c91 100644
  Enforce these SOLID principles and pragmatic guardrails in every implementation:
 ```
 <!-- END_GIT_DIFF -->
+
+## Closure
+
+Manager approval (autopilot, 2026-10-17): "auto approved for closure" + "خودکار همه رو ببند گفتم از من سوال نکن من خوابم" (close them all automatically, don't ask). Executed via commit_and_clean_task.
+- Note: implementation for tasks 16–18 shared one index and rode in feature commit d82a2f8 (closed under task 16); this task's closure commit carries its final task file only.
