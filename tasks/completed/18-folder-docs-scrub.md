@@ -1,9 +1,9 @@
 # Task 18: Living folder docs plus prompt-facing scrub
 
-**File:** `tasks/qa/18-folder-docs-scrub.md`
+**File:** `tasks/completed/18-folder-docs-scrub.md`
 **Source:** manager
 **Type:** docs
-**Status:** open
+**Status:** closed
 
 ## Goal
 
@@ -204,3 +204,8 @@ index cc45c1e..5c1f340 100644
  const queryCache = new Map<string, { at: number; results: SearchResult[] }>();
 ```
 <!-- END_GIT_DIFF -->
+
+## Closure
+
+Manager approval (autopilot, 2026-10-17): "auto approved for closure" + "خودکار همه رو ببند گفتم از من سوال نکن من خوابم" (close them all automatically, don't ask). Executed via commit_and_clean_task.
+- Note: implementation for tasks 16–18 shared one index and rode in feature commit d82a2f8 (closed under task 16); this task's closure commit carries its final task file only.
