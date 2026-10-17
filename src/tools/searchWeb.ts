@@ -28,8 +28,8 @@ export interface SearchResult {
   fetched_at: number;
 }
 
-/** Total wall-clock budget for the enrichment phase (ms). */
-const ENRICH_BUDGET_MS = 45_000;
+/** Total wall-clock budget for the enrichment phase (ms). Overridable via ENRICH_BUDGET_MS. */
+const ENRICH_BUDGET_MS = Number(process.env.ENRICH_BUDGET_MS ?? 45_000);
 
 // Simple in-memory query cache (intent-aware)
 const queryCache = new Map<string, { at: number; results: SearchResult[] }>();

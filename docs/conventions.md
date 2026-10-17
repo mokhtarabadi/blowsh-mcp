@@ -12,6 +12,8 @@ All projects in this ecosystem MUST follow these datetime rules:
 4. **Dual-Representation for Future Events** — Calendar events expose both `event_start_local` (with timezone) and `event_start_epoch_ms` (absolute).
 5. **`TZ=UTC` Infrastructure** — All environments run with `TZ=UTC`. Timezone display is a client-layer responsibility only.
 
+6. **Scope exemption (blowsh-mcp):** this server holds no persistent datetimes — only in-memory TTL expiry (`src/cache.ts`), elapsed-time/deadline measurements (`fetchWeb.ts`, `crawlWeb.ts`, `searchWeb.ts`), and `fetched_at` epoch-ms stamps on outbound results. For these, direct `Date.now()` is permitted; the Clock-injection ban applies if durable timestamps or test-sensitive scheduling logic are ever introduced.
+
 ## SOLID Programming Guidelines
 
 Enforce these SOLID principles and pragmatic guardrails in every implementation:

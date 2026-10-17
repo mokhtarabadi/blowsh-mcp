@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Version drift: AGENTS.md overview now states current 2.6.0; docs/architecture.md structure header, diagram, §3.1, and distribution tag unified on 2.6.0 (matches package.json and src/server.ts).
+- Clock-injection scope: docs/conventions.md now exempts in-memory TTL/elapsed-time `Date.now()` use (no durable timestamps in this server); ban applies if durable scheduling is introduced.
+- Folder docs + env: src/README.md and src/tools/README.md added; .env.example documents ENRICH_BUDGET_MS (now env-overridable, default 45000) and correct MCP_TRANSPORT values; task-number prose already clean outside allowed homes.
+
 ## [2.6.0] - 2026-10-05
 
 ### Added
