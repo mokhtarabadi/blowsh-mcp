@@ -106,6 +106,80 @@ function absolute(href: string | undefined, base: string): string | null {
   }
 }
 
+/**
+ * Deny-list for non-organic URLs (learned from google-sr modular parsers and
+ * serp-parser organic-only rule). Rendered Browsh DOM mixes nav, ads, footer,
+ * consent and related-search anchors with results — accept an anchor only when
+ * its URL survives this filter.
+ */
+function isDeniedResultUrl(abs: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(abs);
+  } catch {
+    return true;
+  }
+  const host = u.hostname.toLowerCase();
+  const path = u.pathname.toLowerCase();
+  // Share-intent and ad hosts (full-URL signals, host-aware).
+  if (host.includes("facebook.com") && abs.toLowerCase().includes("/sharer")) return true;
+  if (host.includes("twitter.com") && abs.toLowerCase().includes("/intent")) return true;
+  if (host.includes("linkedin.com") && abs.toLowerCase().includes("/share")) return true;
+  if (host.startsWith("ads.") || path.includes("/ads/") || path.includes("/aclk")) return true;
+  // Engine-internal search/consent/account paths only — docs on the same
+  // domain (e.g. brave.com/download, support.google.com) must survive.
+  if (host.includes("search.brave.com")) return true;
+  if (host.includes("mojeek.com") && (path.startsWith("/search") || path.includes("/preferences"))) return true;
+  if (
+    host.includes("google.") &&
+    (path.startsWith("/search") ||
+      path.startsWith("/preferences") ||
+      path.startsWith("/advanced_search") ||
+      path.startsWith("/sorry") ||
+      path.startsWith("/accounts") ||
+      path === "/")
+  )
+    return true;
+  if (host.includes("startpage.com") && path.startsWith("/sp/search")) return true;
+  // Generic account/consent/login paths on any host — segment-aware so
+  // content paths like /login-guide survive while /login still drops.
+  const firstSeg = path.split("?")[0].split("#")[0].split("/").filter(Boolean)[0] ?? "";
+  if (
+    firstSeg === "login" ||
+    firstSeg === "signup" ||
+    firstSeg === "account" ||
+    firstSeg === "consent" ||
+    firstSeg === "settings" ||
+    firstSeg === "preferences"
+  )
+    return true;
+  return false;
+}
+
+/**
+ * Lightweight query-relevance guard. Requires token overlap between the query
+ * and title + snippet + URL text. Prevents nav/ad/footer garbage from passing
+ * through merge when selectors drift. Synthetic Instant Answer (empty URL) is
+ * always exempt. CJK queries yielding zero tokens stay exempt (locked by test).
+ */
+export function passesRelevanceGuard(
+  title: string,
+  snippet: string,
+  url: string,
+  query: string
+): boolean {
+  if (!url) return true;
+  const toks = query
+    .toLowerCase()
+    .split(/[^a-z0-9\u00c0-\u024f\u1e00-\u1eff]+/i)
+    .filter((w) => w.length > 2);
+  if (toks.length === 0) return true;
+  const hay = `${title} ${snippet} ${url}`.toLowerCase();
+  const hits = toks.filter((t) => hay.includes(t)).length;
+  if (toks.length <= 3) return hits >= 1;
+  return hits / toks.length >= 0.3;
+}
+
 /** Google search URL (10 results per page, start param). Attempted first; often robot-blocked. */
 function googleSearchUrl(query: string, page: number): string {
   const start = (page - 1) * 10;
@@ -187,21 +261,11 @@ function parseBrave(html: string, baseUrl: string): SearchResult[] {
       const href = a.attr("href");
       const abs = absolute(href, baseUrl);
       if (!abs || !title) return;
-      // filter out brave internal
-      if (abs.includes("search.brave.com")) return;
+      // filter out brave internal + nav/ads/footer (deny-list)
+      if (isDeniedResultUrl(abs)) return;
+      // require snippet sibling so nav-only anchors never pass (serp-parser rule)
+      if (!snippet) return;
       results.push({ title, url: abs, snippet, fetched_at: 0 });
-    });
-  }
-  // fallback generic: any h2/a with snippet-like text
-  if (results.length === 0) {
-    $("a[href^='http']").each((_, el) => {
-      const href = $(el).attr("href");
-      const abs = absolute(href, baseUrl);
-      if (!abs || abs.includes("brave.com")) return;
-      const title = $(el).text().trim();
-      if (title.length < 8 || title.length > 200) return;
-      const snippet = $(el).parent().find("p").first().text().trim().slice(0, 300);
-      if (results.length < 10) results.push({ title, url: abs, snippet, fetched_at: 0 });
     });
   }
   return results.slice(0, 10);
@@ -218,21 +282,10 @@ function parseMojeek(html: string, baseUrl: string): SearchResult[] {
     const href = a.attr("href");
     const abs = absolute(href, baseUrl);
     if (!abs || !title) return;
-    if (abs.includes("mojeek.com")) return;
+    if (isDeniedResultUrl(abs)) return;
+    if (!snippet) return;
     results.push({ title, url: abs, snippet, fetched_at: 0 });
   });
-  // fallback
-  if (results.length === 0) {
-    $("a[href^='http']").each((_, el) => {
-      const href = $(el).attr("href");
-      const abs = absolute(href, baseUrl);
-      if (!abs || abs.includes("mojeek.com")) return;
-      const title = $(el).text().trim();
-      if (title.length < 8 || title.length > 200) return;
-      const snippet = $(el).parent().text().trim().slice(0, 200);
-      if (results.length < 10) results.push({ title, url: abs, snippet, fetched_at: 0 });
-    });
-  }
   return results.slice(0, 10);
 }
 
@@ -243,38 +296,49 @@ function parseMojeek(html: string, baseUrl: string): SearchResult[] {
  */
 export function isBlockedPage(html: string): boolean {
   const $ = load(html);
-  const hasOrganicResults = $("div.g, div.tF2Cxc, .result, .w-gl__result, li.b_algo, .b_algo").length > 0;
-
-  // Organic results present: page is a genuine results page, never a block —
-  // snippet/title text may legitimately mention block phrases (false-positive guard).
-  if (hasOrganicResults) return false;
-
-  const title = $("title").text().toLowerCase().trim();
-  const h1 = $("h1").text().toLowerCase().trim();
-
-  // Explicit title / h1 indicators of block/challenge
-  if (
-    title.includes("unusual traffic") ||
-    title.includes("verifying your request") ||
-    title.includes("aggressive bot activity") ||
-    title.includes("robot check") ||
-    title.includes("sorry...") ||
-    title.includes("attention required") ||
-    h1.includes("unusual traffic") ||
-    h1.includes("verifying your request") ||
-    h1.includes("aggressive bot activity")
-  ) {
-    return true;
-  }
-
-  // Structural challenge signals (captcha forms, challenge redirects)
+  // Structural challenge signals first: captcha forms and challenge widgets
+  // mean block even when stale organic containers linger in the DOM.
   const forms = $('form[action*="Captcha"], form#captcha-form, form[action*="sorry"]');
   if (forms.length > 0) return true;
 
   const recaptcha = $('[data-sitekey], .g-recaptcha, .cf-turnstile, #captcha-form');
   if (recaptcha.length > 0) return true;
 
-  // Dedicated block markers (no organic containers present at this point)
+  const hasOrganicResults = $("div.g, div.tF2Cxc, .result, .w-gl__result, li.b_algo, .b_algo").length > 0;
+
+  const title = $("title").text().toLowerCase().trim();
+  const h1 = $("h1").text().toLowerCase().trim();
+
+  // Strong title/h1 signals win even over stale organic containers — except
+  // genuine SERP titles ("Search: <query>") which legitimately echo block
+  // words from the query; those rely on structural signals above.
+  const genuineSerpTitle = title.startsWith("search") || title.includes("search results");
+  if (!genuineSerpTitle) {
+    if (
+      title.includes("unusual traffic") ||
+      title.includes("verifying your request") ||
+      title.includes("aggressive bot activity") ||
+      title.includes("robot check") ||
+      title.includes("captcha") ||
+      title.includes("consent") ||
+      title.includes("sorry...") ||
+      title.includes("attention required") ||
+      h1.includes("unusual traffic") ||
+      h1.includes("verifying your request") ||
+      h1.includes("aggressive bot activity") ||
+      h1.includes("robot check")
+    ) {
+      return true;
+    }
+  }
+
+  // Organic results present: genuine results page — snippet text may mention
+  // block phrases (false-positive guard for weak text checks; strong title
+  // already won above).
+  if (hasOrganicResults) return false;
+
+  // Weak whole-HTML substring checks last: snippet/body text may legitimately
+  // mention block phrases, so these only decide pages with no organics.
   const l = html.toLowerCase();
   if (
     l.includes("/sorry/index") ||
@@ -299,15 +363,19 @@ export function parseGoogle(html: string, baseUrl: string): SearchResult[] {
     const href = decodeRedirect(a.attr("href"));
     const abs = absolute(href, baseUrl);
     if (!abs || !title) return;
-    if (abs.includes("google.com/")) return;
+    if (isDeniedResultUrl(abs)) return;
     results.push({ title, url: abs, snippet, fetched_at: 0 });
   });
   if (results.length === 0) {
+    // Narrow rescue: /url?q= links are Google-organic-specific (not generic
+    // a[href] sweep), still deny-listed and length-bounded.
+    const NAV_TITLES = new Set(["advanced search", "preferences", "settings", "sign in"]);
     $("a[href*='/url?q=']").each((_, el) => {
       const href = decodeRedirect($(el).attr("href"));
       const abs = absolute(href, baseUrl);
-      if (!abs || abs.includes("google.com/")) return;
+      if (!abs || isDeniedResultUrl(abs)) return;
       const title = $(el).text().trim();
+      if (NAV_TITLES.has(title.toLowerCase())) return;
       if (title.length < 8 || title.length > 200) return;
       if (results.length < 10) results.push({ title, url: abs, snippet: "", fetched_at: 0 });
     });
@@ -713,6 +781,16 @@ async function searchSingleQuery(
     }
 
     let merged = mergeResults(engineResults);
+
+    // Relevance guard: drop zero-overlap items before output and cache so a
+    // drifted selector cannot pass nav/ads garbage through consensus. An
+    // over-strict guard yields honest empty, never garbage.
+    if (merged.length > 0) {
+      const guarded = merged.filter((r) =>
+        passesRelevanceGuard(r.title, r.snippet, r.url, query)
+      );
+      merged = guarded;
+    }
 
     // D3: the inner deadline abort converts slow engines into fulfilled [].
     // An empty merge under a fired global deadline is deadline.hit — throw
