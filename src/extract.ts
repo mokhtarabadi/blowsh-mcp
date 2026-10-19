@@ -1,4 +1,5 @@
 import { load, type CheerioAPI } from "cheerio";
+import type { Element } from "domhandler";
 
 const NOISE_SELECTORS = [
   "script",
@@ -50,10 +51,22 @@ export function extractMainHtml(html: string): string {
   stripNoise($);
 
   const pageLang = (($("html").attr("lang") || "en").split(/[-_]/)[0] ?? "en").toLowerCase();
-  const langBonus = (el: unknown): number => {
-    const lang = $(el as never).closest("[lang]").attr("lang");
-    if (!lang) return 10_000;
-    return (lang.split(/[-_]/)[0] ?? "").toLowerCase() === pageLang ? 10_000 : 0;
+  const langOf = (lang: string | undefined): string => (lang ?? "").split(/[-_]/)[0]?.toLowerCase() ?? "";
+  const langBonus = (el: Element): number => {
+    // Mixed-language container check first: descendants carrying different
+    // explicit langs mean no single language wins — even when the container
+    // itself is untagged (no ancestor `lang` to inherit).
+    let langs = new Set<string>();
+    $(el).find("[lang]").each((_, desc) => {
+      const sub = langOf($(desc).attr("lang"));
+      if (sub) langs.add(sub);
+    });
+    if (langs.size > 1) return 0;
+    // Single descendant language stands in for an untagged container's own.
+    const sole = langs.size === 1 ? [...langs][0] ?? "" : "";
+    const own = langOf($(el).closest("[lang]").attr("lang")) || sole;
+    if (!own) return 10_000;
+    return own === pageLang ? 10_000 : 0;
   };
 
   const candidates: string[] = ["main", "article", '[role="main"]', '[id="content"]', '[id="main"]', '[class*="content"]'];

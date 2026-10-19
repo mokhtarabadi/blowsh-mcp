@@ -57,6 +57,68 @@ const main = extractMainHtml(MULTI_LANG_HTML);
 check("multi-lang extraction prefers english paragraph", main.includes("documentation examples"));
 check("multi-lang extraction does not pick russian paragraph", !main.includes("Данный домен"));
 
+// ── Follow-ups: Hebrew/CJK, wrapper-div, monolingual ranking ───────────────
+
+check(
+  "hebrew query yields tokens",
+  passesRelevanceGuard("מחיר הדולר היום", "שער החליפין", "https://example.com/fx", "מחיר הדולר היום בתל אביב") === true
+);
+check(
+  "cjk query yields tokens",
+  passesRelevanceGuard("美元今日价格走势", "外汇汇率", "https://example.com/fx", "美元今日价格走势") === true
+);
+check(
+  "2-char cjk query stays exempt by design",
+  passesRelevanceGuard("unrelated english title", "unrelated snippet", "https://example.com/x", "美元") === true
+);
+
+const WRAPPER_HTML = `
+<html lang="en"><head><title>Wrapped</title></head><body>
+<div class="wrap">
+<p lang="en">This domain is for use in documentation examples without needing permission from authorities.</p>
+<p lang="ru">Данный домен предназначен для использования в примерах документации без необходимости разрешения.</p>
+</div>
+</body></html>
+`;
+
+const wrapped = extractMainHtml(WRAPPER_HTML);
+check("mixed-lang wrapper loses to english paragraph", wrapped.includes("documentation examples"));
+check("mixed-lang wrapper does not leak russian", !wrapped.includes("Данный домен"));
+
+const UNTAG_WRAPPER_HTML = `
+<html><head><title>NoLang</title></head><body>
+<div class="wrap">
+<p lang="en">Untagged wrapper holding documentation examples in english for testing purposes here.</p>
+<p lang="ru">Данный домен предназначен для использования в примерах документации для тестирования.</p>
+</div>
+</body></html>
+`;
+
+const untag = extractMainHtml(UNTAG_WRAPPER_HTML);
+check("untagged mixed wrapper loses to english paragraph", untag.includes("documentation examples"));
+check("untagged mixed wrapper does not leak russian", !untag.includes("Данный домен"));
+
+const MONO_HTML = `
+<html><head><title>Mono</title></head><body>
+<p>Short note.</p>
+<p>This is the longest paragraph on this monolingual page by a clear margin, so length ranking must pick it.</p>
+<p>Medium paragraph with some more words here.</p>
+</body></html>
+`;
+
+const mono = extractMainHtml(MONO_HTML);
+check("monolingual ranking picks longest paragraph", mono.includes("longest paragraph"));
+
+const TIE_HTML = `
+<html><head><title>Tie</title></head><body>
+<p>First paragraph with exactly thirty characters!!</p>
+<p>Second paragraph with exactly thirty characters!</p>
+</body></html>
+`;
+
+const tied = extractMainHtml(TIE_HTML);
+check("monolingual tie keeps first paragraph", tied.includes("First paragraph"));
+
 console.log(`\n${passed} checks passed`);
 if (process.exitCode) {
   process.exit(process.exitCode);
