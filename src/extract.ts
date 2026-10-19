@@ -40,10 +40,21 @@ function stripNoise($: CheerioAPI): void {
  * Readability-style main-content extraction: prefers <main>, falls back to
  * <article>, then the largest text-density block, finally <body>.
  * Always strips nav/footer/header/aside/scripts/style.
+ * Language preference: elements whose nearest `lang` matches the page language
+ * (or inherit it) score a bonus, so a multi-lang page yields the page-language
+ * paragraph instead of whichever paragraph is longest. Monolingual pages are
+ * unaffected (uniform bonus preserves length ranking, first wins ties).
  */
 export function extractMainHtml(html: string): string {
   const $ = load(html);
   stripNoise($);
+
+  const pageLang = (($("html").attr("lang") || "en").split(/[-_]/)[0] ?? "en").toLowerCase();
+  const langBonus = (el: unknown): number => {
+    const lang = $(el as never).closest("[lang]").attr("lang");
+    if (!lang) return 10_000;
+    return (lang.split(/[-_]/)[0] ?? "").toLowerCase() === pageLang ? 10_000 : 0;
+  };
 
   const candidates: string[] = ["main", "article", '[role="main"]', '[id="content"]', '[id="main"]', '[class*="content"]'];
   for (const sel of candidates) {
@@ -55,15 +66,23 @@ export function extractMainHtml(html: string): string {
   }
 
   let best = "";
+  let bestScore = 0;
   let bestLen = 0;
+  let bestMatched = false;
   $("div, section, p").each((_, el) => {
     const textLen = $(el).text().trim().length;
-    if (textLen > bestLen) {
+    const bonus = langBonus(el);
+    const score = textLen + bonus;
+    if (score > bestScore) {
+      bestScore = score;
       bestLen = textLen;
+      bestMatched = bonus > 0;
       best = $(el).html() ?? "";
     }
   });
-  if (bestLen > 100) return best;
+  // Raw-length gate preserves old behavior; a language-matched block is a
+  // confident pick at the lower candidate threshold instead of body fallback.
+  if (bestLen > 100 || (bestMatched && bestLen > 50)) return best;
 
   return $("body").html() ?? "";
 }

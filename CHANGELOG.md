@@ -5,6 +5,7 @@
 ### Fixed
 
 - Search parser hardening: removed generic `a[href]` fallbacks in Brave/Mojeek parsers (strict organic containers with snippet sibling + deny-list), `isBlockedPage` structural signals now win over stale organic containers, Google `/url?q=` rescue deny-listed, query-relevance guard drops zero-overlap garbage before merge. New `tests/search-parser-hardening-regression.ts` (9 checks).
+- Multilingual quality gaps: `passesRelevanceGuard` tokenizer is now Unicode-aware (`\p{L}` + numbers), so Persian/Arabic/Cyrillic queries yield tokens instead of slipping through the empty exemption; `extractMainHtml` prefers page-language paragraphs, so multi-lang pages return English instead of the longest non-English paragraph. New `tests/multilingual-relevance-guard-regression.ts` (8 checks).
 - Version drift: AGENTS.md overview now states current 2.6.0; docs/architecture.md structure header, diagram, §3.1, and distribution tag unified on 2.6.0 (matches package.json and src/server.ts).
 - Clock-injection scope: docs/conventions.md now exempts in-memory TTL/elapsed-time `Date.now()` use (no durable timestamps in this server); ban applies if durable scheduling is introduced.
 - Folder docs + env: src/README.md and src/tools/README.md added; .env.example documents ENRICH_BUDGET_MS (now env-overridable, default 45000) and correct MCP_TRANSPORT values; task-number prose already clean outside allowed homes.

@@ -160,7 +160,10 @@ function isDeniedResultUrl(abs: string): boolean {
  * Lightweight query-relevance guard. Requires token overlap between the query
  * and title + snippet + URL text. Prevents nav/ad/footer garbage from passing
  * through merge when selectors drift. Synthetic Instant Answer (empty URL) is
- * always exempt. CJK queries yielding zero tokens stay exempt (locked by test).
+ * always exempt. Tokenization is Unicode-aware (Letter + Number, `u` flag) so
+ * Persian/Arabic/Cyrillic/CJK queries yield tokens instead of slipping through
+ * the genuinely-empty exemption. CJK queries yielding zero tokens stay exempt
+ * (locked by test).
  */
 export function passesRelevanceGuard(
   title: string,
@@ -169,10 +172,7 @@ export function passesRelevanceGuard(
   query: string
 ): boolean {
   if (!url) return true;
-  const toks = query
-    .toLowerCase()
-    .split(/[^a-z0-9\u00c0-\u024f\u1e00-\u1eff]+/i)
-    .filter((w) => w.length > 2);
+  const toks = (query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((w) => w.length > 2);
   if (toks.length === 0) return true;
   const hay = `${title} ${snippet} ${url}`.toLowerCase();
   const hits = toks.filter((t) => hay.includes(t)).length;
