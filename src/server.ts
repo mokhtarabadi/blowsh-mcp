@@ -253,7 +253,7 @@ async function createServer() {
   const server = new Server(
     {
       name: "blowsh-mcp",
-      version: "2.6.1",
+      version: "2.6.2",
     },
     {
       capabilities: { tools: {} },

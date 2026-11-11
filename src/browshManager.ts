@@ -86,6 +86,7 @@ class BrowshManager {
   private readonly firefoxPath: string;
   private readonly healthPath: string = "/";
   private readonly requestTimeoutMs: number;
+  private readonly startupTimeoutMs: number;
   private readonly recycleThreshold: number;
   private readonly idleTimeoutMs: number;
   private readonly profileDir: string;
@@ -103,6 +104,11 @@ class BrowshManager {
     this.firefoxPath =
       firefoxPath || process.env.BROWSH_FIREFOX_PATH || "firefox";
     this.requestTimeoutMs = Number(process.env.BROWSH_REQUEST_TIMEOUT_MS) || 30_000;
+    // Cold-start budget for the Browsh HTTP endpoint. Measured 31s on a warm
+    // profile in the fat image, so the old hardcoded 30s window killed the
+    // browser about one second before it was ready and every first fetch after
+    // a container start failed. Configurable; default leaves real headroom.
+    this.startupTimeoutMs = clampIntEnv(process.env.BROWSH_STARTUP_TIMEOUT_MS, 10_000, 300_000, 60_000, "BROWSH_STARTUP_TIMEOUT_MS");
     this.recycleThreshold = Number(process.env.BROWSH_RECYCLE_REQUESTS) || 100;
     this.idleTimeoutMs = Number(process.env.BROWSH_IDLE_TIMEOUT_MS) || 600_000;
     // Persistent Firefox profile: Browsh 1.8.0 offers no profile-dir flag, so
@@ -204,7 +210,7 @@ class BrowshManager {
         LINES: String(this.rows),
       },
     });
-    const ready = await this.waitForReady(30000);
+    const ready = await this.waitForReady(this.startupTimeoutMs);
     if (!ready) {
       await this.shutdown();
       throw new FetchError(`Browsh did not start in HTTP mode within timeout`);
