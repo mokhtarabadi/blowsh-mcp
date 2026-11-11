@@ -82,8 +82,16 @@ Before any execution, you MUST read this `AGENTS.md` file first. Inside it, you 
 
 You MUST follow these skill loading rules in every session:
 
-- **Task-Generator Skill:** Before creating any new task file, you MUST load the `task-generator` skill using the `skill` tool to ensure the correct template format with `<!-- BEGIN_GIT_DIFF -->` / `<!-- END_GIT_DIFF -->` markers.
+- **Task-Generator Skill:** Before creating any new task file, you MUST load the `kanban-lifecycle` skill using the `skill` tool to ensure the correct template format with `<!-- BEGIN_GIT_DIFF -->` / `<!-- END_GIT_DIFF -->` markers.
 - **Project Skills:** Before implementing any task, you MUST load every available skill matching the project's tech stack. This project uses TypeScript/Node — if a Node/TypeScript or MCP-related skill exists in the environment, load it; otherwise rely on this file, `docs/`, and the strict tsc build. For debugging, load `debug-instrumentation`; for docs, `doc-coauthoring`.
+
+### Project Skills (local workspace skills)
+
+Scan `.opencode/skills/*/SKILL.md` on every audit and keep this table current — a missing table or a stale row is an audit failure.
+
+| Skill | Trigger | Duty |
+| ----- | ------- | ---- |
+| _(none)_ | — | `.opencode/skills/` currently holds no local `SKILL.md`; global skills from the Skill Auto-Loading Matrix apply. |
 
 ## 🛑 TASK MANAGEMENT & OPENCODE RULES
 
@@ -91,6 +99,9 @@ You MUST follow these skill loading rules in every session:
 - **No Monolithic State:** Agents are strictly forbidden from creating `TODO.md` or `STATE.md`.
 - **Zero-Autonomous-Commit:** Agents MUST be strictly forbidden from executing Git commands autonomously; they may only run Git commands when explicitly instructed by the Orchestrator. **Exception:** `git mv` is permitted for moving task files between Kanban directories (`backlog`, `in-progress`, `qa`, `completed`, `archive`).
 - **Explicit Staging Contract (F5):** Verify that the active task's `Execution Log & Reasoning` or `summary_phase` passed a `modified_files` list to `stage_and_inject_diff` — blind `git add -A .` staging is banned because it sweeps parallel-session files into unrelated commits.
+- **Parallel Index Isolation:** When two tasks run in parallel and share files, touch only your own task's files. If the staged diff holds foreign hunks, call `custom_context_unstage_files` with exactly those files (index-only unstage, worktree untouched), redo hunk-level staging, then call `stage_and_inject_diff` with `skip_add=True`. `git add`, `git commit`, `git checkout`, and `git push` stay forbidden everywhere.
+- **Edit Tool Discipline:** Agents may create or modify files ONLY with native file-editing tools. Python, shell, heredoc, and `sed -i` are banned for edits — scripted edits fail silently while native tools fail loudly on a non-unique anchor. Shell stays read-only for file content (`grep`, `cat`, `diff`, `ls`, `git status`). A non-unique or missing anchor must be widened and retried once, never forced. See `docs/conventions.md` `## Edit Tool Discipline`.
+- **Living Folder Docs Sibling Inspection:** Before editing code inside a component or feature directory, inspect the sibling `README.md` and `DECISIONS.md`; update them in the same task when domain contracts or architectural decisions change.
 - **Buffer Isolation:** The shared validation phase MUST include a buffer-flush directive requiring Hands to treat every task as contextually independent, preventing cross-task context leakage.
 - **MCP Report Generation:** Agents MUST generate context reports (`custom_context_read_source_files`) and tree reports (`custom_context_create_tree_report` — "create a tree of the project") via the MCP server and hand the file path to the Manager instead of reading `context-reports/` files inline.
 - **UI/UX Enforcement:** Any UI/UX changes MUST enforce the guidelines defined in the project's `DESIGN.md`.
@@ -107,24 +118,17 @@ When finishing a task, you MUST execute these exact steps in order:
 
 1. **Update Changelog:** You MUST insert a formal entry into CHANGELOG.md logging your modifications.
 2. **Write your Summary:** Manually write your architectural reasoning, local TODO checks, and execution notes into the active `tasks/XX-task.md` file under "OpenCode Execution Log" / "Execution Log & Reasoning".
-3. **Call MCP Tool & QA Transition:** Call the `custom_context_stage_and_inject_diff` MCP tool passing the task file path and the full `modified_files` array. After injection, you MUST move the task file to `tasks/qa/` via `git mv tasks/in-progress/<file> tasks/qa/<file>` before notifying the Manager (implementation tasks only — discovery tasks stay in place). DO NOT execute any `git commit` commands. Closure to `tasks/completed/` happens ONLY after the Manager explicitly says "Approved for closure" or "Close task".
-4. **Kanban Metadata Synchronization (mandatory after ANY authorized `git mv`):** After the move, update the task file's `**File:**` metadata header to the new `tasks/qa/<file>` path. If the move happened AFTER staging, re-run `lint_task_file` and call `custom_context_stage_and_inject_diff` AGAIN with the NEW task path and the full `modified_files` array before notifying the Manager — the re-stage keeps the injected diff and staging state in sync with the final path. Never notify the Manager with a stale `**File:**` header.
-5. **Notify Manager:** Output exactly: "Task ready. Manager, please copy the contents of `tasks/XX-task.md` and send it back to the Orchestrator Brain for review."
-
-## 🛑 LITE MODE PROTOCOL
-
-- **Eligibility:** When a task is single-file, has no security/financial impact, and has obvious simplicity, the full 9-step production line can be bypassed.
-- **Justification:** The Hands MUST log a `[LITE]` justification entry in the task's `## Execution Log & Reasoning` section using the format `**[YYYY-MM-DD] [LITE] [EXECUTION-DETECTED]:** <reason>`.
-- **Escalation:** If hidden complexity is discovered mid-execution, escalation to Full Mode is mandatory — the Hands MUST halt Lite execution and switch to the complete workflow.
-- **Guardrail:** Lite Mode is never allowed for multi-file changes, security-sensitive paths, or financial ledger operations.
+3. **Call MCP Tool & QA Transition:** Call `custom_context_qa_transition` ONCE with the active task path and the explicit `modified_files` array. It atomically moves the task file to `tasks/qa/`, synchronizes its `**File:**` header, stages the modified files, and injects the diff. Do not perform a separate task move, header edit, or re-stage (implementation tasks only — discovery tasks stay in place). DO NOT execute any `git commit` commands. Closure to `tasks/completed/` happens ONLY after the Manager explicitly says "Approved for closure" or "Close task".
+4. **Kanban Metadata Synchronization:** The transition tool owns the header rewrite. Never hand-edit `**File:**` after a move and never notify the Manager with a stale path — if a move happened by any other authorized means, re-run `lint_task_file` and re-stage with the new task path and the full `modified_files` array.
+5. **Notify Manager:** State that the task is in QA and that QA/review will be chained directly through `brain_turn` under the same `task_id`. Never ask the Manager to copy, paste, or relay task contents.
 
 ## 🛑 DECISION LOGGING MANDATE
 
-- Agents MUST log non-trivial architectural, design, and strategic decisions under `## Manager Decisions` in the active task file using the format `**[YYYY-MM-DD] [DECISION_ID] [SOURCE]:** <summary>` where `SOURCE` is `ORCHESTRATOR-DETECTED`, `EXECUTOR-DETECTED`, or `EXECUTION-DETECTED`, with rationale, alternatives considered, and impact.
+- Agents MUST log non-trivial architectural, design, and strategic decisions under `## Decision Log` in the active task file using the format `**[YYYY-MM-DD] [DECISION_ID] [SOURCE]:** <summary>` where `SOURCE` is `ORCHESTRATOR-DETECTED`, `EXECUTOR-DETECTED`, or `EXECUTION-DETECTED`, with rationale, alternatives considered, and impact.
 - The Orchestrator is expected to pre-seed this section with `[ORCHESTRATOR-DETECTED]` entries during task generation when applicable.
 - **Decision Detection Responsibility:** When the Manager talks directly to the Hands without going through the Orchestrator, the Hands MUST perform the decision-detection role: Detect the Manager's goals/decisions, Log them tagged `[EXECUTOR-DETECTED]`, Preserve pre-seeded `[ORCHESTRATOR-DETECTED]` entries, and ensure the log is Coach-Readable and chronologically ordered. See `agents/cognitive-executor.md` for the executor detection role.
 - **AC/DoD Box-Checking at Implementation Time:** During the implementation `<summary_phase>`, the Hands MUST check every `## Acceptance Criteria` and `## Definition of Done` box that is genuinely satisfied by the recorded `## Verification Evidence` — do NOT defer box-checking to a closure task. See `prompts/fragments/09-hands_protocols.md` for the authoritative instruction.
-- See `docs/conventions.md` `## Decision Logging Standard` for the canonical format. See `skill-templates/task-generator/SKILL.md` for the `[SOURCE]` tag template.
+- See `docs/conventions.md` `## Decision Logging Standard` for the canonical format. See the `kanban-lifecycle` skill for the `[SOURCE]` tag template.
 
 ## 🛑 DEFENSIVE SHELL PROTOCOL (DSP)
 

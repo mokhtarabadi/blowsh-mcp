@@ -1,3 +1,4 @@
+// Sibling Docs: src/tools/README.md | Decisions: src/tools/DECISIONS.md
 import { browshManager } from "../browshManager.js";
 import { html2markdownConvert } from "../html2markdownManager.js";
 import { extractPdf } from "./extractPdf.js";
@@ -16,6 +17,7 @@ import {
   stripLinks,
   stripMedia,
   applyOffset,
+  hasReadableText,
 } from "../extract.js";
 import { FetchError, createDeadlineError } from "../errors.js";
 import {
@@ -71,6 +73,65 @@ const HTML_CONTENT_TYPES = [
   "application/xml",
   "text/xml",
 ];
+
+/**
+ * Result of one render pass: the produced content plus the facts needed to
+ * describe an empty extraction honestly (DOM size and the renderer branch).
+ */
+export interface RenderResult {
+  /** Content produced for the requested `type`. */
+  content: string;
+  /** Char length of the rendered DOM the content came from (0 when the path never fetched one). */
+  domChars: number;
+  /** Renderer branch label used in the empty-extraction diagnostic. */
+  source: string;
+}
+
+/** Stable machine-readable code for a render that produced no usable text. */
+export const EMPTY_EXTRACTION_CODE = "empty.extraction";
+
+/** Context carried into the empty-extraction guard. */
+export interface EmptyExtractionContext {
+  url: string;
+  /** Requested output type: plain | html | markdown | pdf. */
+  type: string;
+  /** Char length of the rendered DOM (0 when the path never fetched one). */
+  domChars: number;
+  /** Renderer branch label (e.g. browsh-markdown, archive-snapshot, stitch). */
+  source: string;
+}
+
+/**
+ * Per-type usability rule for extracted content.
+ *
+ * - `html`: the payload is markup, so a DOM shell with no visible text is still
+ *   content worth serving (callers inspect the shell). Only a blank DOM fails.
+ * - every text type (plain/markdown/pdf): whitespace-only output fails, and so
+ *   does output with no readable text after markup stripping.
+ *
+ * Pure, so the contract is testable without Browsh or html2markdown.
+ */
+export function hasUsableExtraction(content: string, type: string): boolean {
+  if (content.trim().length === 0) return false;
+  if (type === "html") return true;
+  return hasReadableText(content);
+}
+
+/**
+ * Single empty-extraction guard. Throws a `FetchError` (code
+ * `empty.extraction`) when a render produced no usable text, naming the URL,
+ * the renderer branch, the rendered DOM size, and the extracted text size.
+ *
+ * Never returns an error string: a failed extraction is an error, not a
+ * success body (AGENTS.md guardrail, DESIGN.md error style).
+ */
+export function guardEmptyExtraction(content: string, ctx: EmptyExtractionContext): void {
+  if (hasUsableExtraction(content, ctx.type)) return;
+  throw new FetchError(
+    `empty extraction for ${ctx.url} via ${ctx.source} [dom ${ctx.domChars} chars, text ${content.trim().length} chars]`,
+    { url: ctx.url, code: EMPTY_EXTRACTION_CODE }
+  );
+}
 
 interface SniffResult {
   contentType: string;
@@ -267,6 +328,27 @@ function handleSinceLast(url: string, content: string, enabled?: boolean): { con
 // DOM → final content processing (toc/section/markdown conversion/focus/probe)
 // ---------------------------------------------------------------------------
 
+/**
+ * Converts HTML to markdown, retrying once from the full DOM when the
+ * readability pass narrowed to an empty shell while the DOM still holds
+ * readable text. The retry is the fallback the task file asks for before the
+ * exit guard fails a page loudly.
+ */
+async function convertMarkdownWithRetry(
+  sourceHtml: string,
+  fullDom: string,
+  url: string,
+  baseLabel: string
+): Promise<{ markdown: string; source: string }> {
+  let markdown = await html2markdownConvert(sourceHtml, { domain: url });
+  if (hasUsableExtraction(markdown, "markdown")) return { markdown, source: baseLabel };
+  // Readability found no text in the narrowed fragment; only a full-DOM retry
+  // is justified when the untouched DOM still carries readable text.
+  if (!hasReadableText(fullDom)) return { markdown, source: baseLabel };
+  markdown = await html2markdownConvert(fullDom, { domain: url });
+  return { markdown, source: `${baseLabel}+full-dom-retry` };
+}
+
 async function processDomForType(dom: string, url: string, opts: FetchWebOptions): Promise<string> {
   const { type, selector, focus, toc, section, must_contain, links, media } = opts;
 
@@ -329,7 +411,14 @@ async function processDomForType(dom: string, url: string, opts: FetchWebOptions
     } else {
       htmlForMd = extractMainHtml(sourceHtml ?? dom);
     }
-    let md = await html2markdownConvert(htmlForMd, { domain: url });
+    // No selector: the readability pass may have narrowed to an empty shell,
+    // so allow the single full-DOM retry before the exit guard can fail.
+    let md: string;
+    if (selector) {
+      md = await html2markdownConvert(htmlForMd, { domain: url });
+    } else {
+      md = (await convertMarkdownWithRetry(htmlForMd, dom, url, "browsh-markdown")).markdown;
+    }
     if (focus) md = focusFilter(md, focus);
     if (links === false) md = stripLinks(md);
     if (media === false) md = stripMedia(md);
@@ -471,6 +560,9 @@ async function fetchWebInner(opts: FetchWebOptions): Promise<string> {
       return out;
     }
     const text = await extractPdf(url);
+    // PDF text leaves the extractor here; an empty extraction must not be
+    // cached or returned as a success.
+    guardEmptyExtraction(text, { url, type: "pdf", domChars: 0, source: "pdf-pdftotext" });
     pageCache.set(pdfKey, text);
     let out = text;
     if (offset) out = applyOffset(out, offset);
@@ -522,6 +614,9 @@ async function fetchWebInner(opts: FetchWebOptions): Promise<string> {
   if (opts.stitch && type === "markdown") {
     try {
       const rawStitched = await fetchStitchedMarkdown(url, opts);
+      // Stitch bypasses render(): guard it here so a multi-page flow cannot
+      // return an empty body as a success either.
+      guardEmptyExtraction(rawStitched, { url, type, domChars: 0, source: "stitch" });
       // Cache clean rendered content BEFORE slicing transforms
       pageCache.set(key, rawStitched);
       // Slicing/transforms happen on read path after cache retrieval
@@ -668,6 +763,14 @@ async function processArchiveSnapshot(snap: WaybackSnapshot, opts: FetchWebOptio
     if (opts.links === false) content = stripLinks(content);
     if (opts.media === false) content = stripMedia(content);
   }
+  // An archived snapshot that yields no usable text is the same failure as a
+  // live one — guard it before the banner can mask the empty body.
+  guardEmptyExtraction(content, {
+    url,
+    type: opts.type,
+    domChars: snap.html.length,
+    source: "archive-snapshot",
+  });
   const dateStr = snap.timestamp ? `${snap.timestamp.slice(0, 4)}-${snap.timestamp.slice(4, 6)}-${snap.timestamp.slice(6, 8)}` : snap.timestamp;
   return `> [archive snapshot from ${dateStr} via Wayback Machine — live fetch failed, serving archived copy: ${snap.url}]\n\n${content}`;
 }
@@ -678,17 +781,27 @@ async function render(opts: FetchWebOptions): Promise<string> {
   const deadline = (wait_ms ?? 0) > 0 ? Date.now() + wait_ms! : 0;
 
   let previous = "";
-  let current = "";
+  // Seeded so the loop result is always defined for the guard below.
+  let current: RenderResult = { content: "", domChars: 0, source: "unrendered" };
   for (;;) {
     current = await renderOnce(opts);
-    if (deadline === 0 || Date.now() >= deadline || current === previous) break;
-    previous = current;
+    if (deadline === 0 || Date.now() >= deadline || current.content === previous) break;
+    previous = current.content;
     await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
   }
-  return current;
+  // Single exit guard: every renderer branch funnels through here, so no type
+  // can return an empty body as a success — and the caller caches only what
+  // this guard already accepted.
+  guardEmptyExtraction(current.content, {
+    url: opts.url,
+    type: opts.type,
+    domChars: current.domChars,
+    source: current.source,
+  });
+  return current.content;
 }
 
-async function renderOnce(opts: FetchWebOptions): Promise<string> {
+async function renderOnce(opts: FetchWebOptions): Promise<RenderResult> {
   const { url, type, selector, tier } = opts;
 
   // pdf is handled entirely in fetchWeb() before render() is ever called. If
@@ -727,10 +840,14 @@ async function renderOnce(opts: FetchWebOptions): Promise<string> {
         if (opts.must_contain) {
           const probe = probeMustContain(text, opts.must_contain);
           const excerpts = probe.excerpts.length > 0 ? probe.excerpts.map((e, i) => `${i + 1}. ${e}`).join("\n") : "_(no context)_";
-          return `${probe.verdict} for "${opts.must_contain}" (${url})\n\n${excerpts}`;
+          return {
+            content: `${probe.verdict} for "${opts.must_contain}" (${url})\n\n${excerpts}`,
+            domChars: text.length,
+            source: "http-direct-probe",
+          };
         }
         // links/media not relevant for non-HTML (JSON/text)
-        return truncate(text, opts.max_chars);
+        return { content: truncate(text, opts.max_chars), domChars: text.length, source: "http-direct" };
       } catch (e) {
         // Axios throws ERR_BAD_RESPONSE when maxContentLength is exceeded.
         if (axios.isAxiosError(e) && e.code === "ERR_BAD_RESPONSE") {
@@ -762,11 +879,11 @@ async function renderOnce(opts: FetchWebOptions): Promise<string> {
       if (!isHtml) {
         let text = String(res.data);
         if (opts.focus) text = focusFilter(text, opts.focus);
-        return text;
+        return { content: text, domChars: text.length, source: "http-only" };
       }
       // For HTML via HTTP-only, convert directly without Browsh (may miss JS content — honest limitation of tier 1)
       const dom = String(res.data);
-      return processDomForType(dom, url, opts);
+      return { content: await processDomForType(dom, url, opts), domChars: dom.length, source: "http-only-dom" };
     } catch (e) {
       if (e instanceof FetchError) throw e;
       throw new FetchError(`tier 1: HTTP-only fetch failed for ${url}: ${e instanceof Error ? e.message : String(e)}`, { url });
@@ -775,7 +892,9 @@ async function renderOnce(opts: FetchWebOptions): Promise<string> {
 
   // plain without selector and without enhanced params → Browsh terminal text (fast path)
   if (type === "plain" && !selector && !opts.toc && !opts.section && !opts.focus && !opts.must_contain) {
-    return browshManager.fetchPlain(url);
+    // Terminal text path: no DOM is captured, so domChars stays 0 and the
+    // guard reports the renderer branch honestly.
+    return { content: await browshManager.fetchPlain(url), domChars: 0, source: "browsh-plain" };
   }
 
   const dom = await browshManager.fetchDom(url);
@@ -785,7 +904,7 @@ async function renderOnce(opts: FetchWebOptions): Promise<string> {
   // For simple html/plains without enhanced params, keep legacy fast logic but reuse processor for consistency.
   const hasEnhanced = opts.toc || opts.section || opts.focus || opts.must_contain || opts.links === false || opts.media === false;
   if (hasEnhanced) {
-    return processDomForType(dom, url, opts);
+    return { content: await processDomForType(dom, url, opts), domChars: dom.length, source: "browsh-dom" };
   }
 
   if (type === "html") {
@@ -794,24 +913,32 @@ async function renderOnce(opts: FetchWebOptions): Promise<string> {
       if (html === null) {
         throw new FetchError(`CSS selector '${selector}' matched nothing`, { url });
       }
-      return html;
+      return { content: html, domChars: dom.length, source: "browsh-html-selector" };
     }
-    return dom;
+    return { content: dom, domChars: dom.length, source: "browsh-html" };
   }
 
   if (type === "markdown") {
     let source = dom;
+    let sourceLabel = "browsh-markdown";
     if (selector) {
       const html = selectHtml(dom, selector);
       if (html === null) {
         throw new FetchError(`CSS selector '${selector}' matched nothing`, { url });
       }
       source = html;
+      sourceLabel = "browsh-markdown-selector";
     } else {
       // Boilerplate stripping when no explicit selector is given.
       source = extractMainHtml(dom);
     }
-    return html2markdownConvert(source, { domain: url });
+    if (selector) {
+      return { content: await html2markdownConvert(source, { domain: url }), domChars: dom.length, source: sourceLabel };
+    }
+    // No selector: readability can narrow to an empty shell, so allow the
+    // single full-DOM retry before the exit guard fails the page loudly.
+    const converted = await convertMarkdownWithRetry(source, dom, url, sourceLabel);
+    return { content: converted.markdown, domChars: dom.length, source: converted.source };
   }
 
   // plain + selector → extract text from the rendered DOM (enhanced case already handled)
@@ -819,7 +946,7 @@ async function renderOnce(opts: FetchWebOptions): Promise<string> {
   if (text === null) {
     throw new FetchError(`CSS selector '${selector}' matched nothing`, { url });
   }
-  return text;
+  return { content: text, domChars: dom.length, source: "browsh-plain-selector" };
 }
 
 function settleKey(o: FetchWebOptions): string {

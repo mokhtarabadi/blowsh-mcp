@@ -54,7 +54,7 @@ Task numbers are provenance for humans, not reasoning material for the model. A 
 
 ## Decision Logging Standard
 
-All non-trivial architectural, design, and strategic decisions MUST be logged under `## Manager Decisions` in the active task file using the format:
+All non-trivial architectural, design, and strategic decisions MUST be logged under `## Decision Log` in the active task file using the format:
 
 ```
 **[YYYY-MM-DD] [DECISION_ID] [SOURCE]:** <summary>
@@ -67,16 +67,35 @@ Where `SOURCE` is one of:
 
 - `ORCHESTRATOR-DETECTED` — pre-seeded by the Orchestrator during task generation
 - `EXECUTOR-DETECTED` — detected and logged by the Hands during direct Manager conversation
-- `EXECUTION-DETECTED` — technical necessity discovered during implementation (e.g., Lite Mode justification `[LITE]`)
+- `EXECUTION-DETECTED` — technical necessity discovered during implementation
 
 Rules:
 
 - Sequential `DECISION_ID` per task (D1, D2, ... or 001, 002)
 - Chronologically ordered, coach-readable
 - Preserve `[ORCHESTRATOR-DETECTED]` entries unmodified — append only
-- For Lite Mode tasks, log a `[LITE]` justification entry with reason for bypassing full production line
 
-See `prompts/fragments/17-decision_logging_mandate.md` for Decision Detection Responsibility and `agents/cognitive-executor.md` for executor role. See `skill-templates/task-generator/SKILL.md` for `[SOURCE]` tag template.
+See `prompts/fragments/17-decision_logging_mandate.md` for Decision Detection Responsibility and `agents/cognitive-executor.md` for executor role. See the `kanban-lifecycle` skill for the `[SOURCE]` tag template.
+
+## Edit Tool Discipline
+
+File edits use ONLY native file-editing tools (edit for replacements, file-write tools for new files). Using python, shell, heredoc, `sed -i`, or any script to create or modify files is strictly forbidden — scripted edits fail silently (replace-all on non-unique anchors, quoting and encoding mangling) while native tools fail loudly on a non-unique anchor.
+
+1. **Default native only:** one replacement, one location, exact unique anchor. A no-match or multi-match error is a signal, never a retry hint.
+2. **No scripted edits:** python, shell, heredoc, and `sed -i` are banned for creating or modifying files. Shell stays read-only for file content (e.g. `grep`, `cat`, `diff`, `ls`, `git status`).
+3. **Verify always:** `grep`/`diff` after every edit.
+
+## Living Folder Docs Standard
+
+All vertical slices and component directories in this repository MUST maintain colocated documentation and decision records:
+
+1. **Folder Colocation** — Every domain component or vertical slice directory (e.g. `src/tools/`) must contain:
+   - `README.md` — Explains the component's core duties, directory layout, owned files, and critical invariants/risks.
+   - `DECISIONS.md` — Chronological log of dated Architectural Decision Records (ADRs). Each entry documents Context, Decision, Consequences, and Rollback strategy.
+2. **One-Line Code Pointer Standard** — Primary source files within the component directory must include a top-line comment pointing directly to the sibling docs:
+   - JavaScript/TypeScript: `// Sibling Docs: <relative-path>/README.md | Decisions: <relative-path>/DECISIONS.md`
+   - Python/Shell: `# Sibling Docs: <relative-path>/README.md | Decisions: <relative-path>/DECISIONS.md`
+3. **Synchronization Invariant** — Whenever source code inside a component directory is added, refactored, or altered in behavior or data contract, the sibling `README.md` and `DECISIONS.md` MUST be inspected and updated within the same task. Silent overrides of existing architectural decisions are strictly forbidden.
 
 ## Software Conventions (blowsh-mcp specific)
 

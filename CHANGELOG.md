@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `fetch_web` silent empty success: a render that produced no readable text (JS-heavy SPA shell behind bot protection, login wall, image-only page) used to return a one-byte body as a success and cache it. Extraction now funnels through one guard at the render exit (`guardEmptyExtraction`, stable code `empty.extraction`) plus the same guard on the stitch, archive, and pdf paths, so an empty body throws a `FetchError` with the stable code `empty.extraction` and the message `empty extraction for <url> via <source> [dom N chars, text M chars]` instead of passing as content. Text types fail on whitespace-only output; `type: "html"` keeps its markup exemption (a shell with no visible text still returns its DOM). Markdown gets one full-DOM retry when the readability pass narrowed to an empty shell while the DOM still held text. Empty results are never cached. New `tests/empty-extraction-guard-tests.ts` (15 checks, renderer stubbed, no network).
+
 ## [2.6.1] - 2026-10-19
 
 ### Fixed

@@ -100,6 +100,26 @@ export function extractMainHtml(html: string): string {
   return $("body").html() ?? "";
 }
 
+/**
+ * True when the markup carries visible text once scripts, styles, templates
+ * and tags are stripped.
+ *
+ * This is the empty-extraction signal for text output types (markdown/plain):
+ * a JS-heavy SPA that renders only `#root` containers has a large DOM but no
+ * readable text, and must never be served as a successful fetch. Markup output
+ * (`type: "html"`) is exempt — its payload is the DOM itself.
+ *
+ * Pure and side-effect free so tests can classify markup without a renderer.
+ */
+export function hasReadableText(html: string): boolean {
+  if (!html || html.trim().length === 0) return false;
+  const $ = load(html);
+  stripNoise($);
+  const body = $("body");
+  const text = body.length > 0 ? body.text() : $.root().text();
+  return text.replace(/\s+/g, " ").trim().length > 0;
+}
+
 /** Extracts the text content of a CSS selector (first match), or null. */
 export function selectText(html: string, selector: string): string | null {
   const $ = load(html);

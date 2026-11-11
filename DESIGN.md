@@ -40,6 +40,7 @@
   - `FetchError: Request failed with status <status>`
   - `FetchError: Browsh did not start in HTTP mode within timeout`
   - `FetchError: archive.stale: no Wayback snapshot for <url> [archive=only]`
+  - `FetchError: empty extraction for <url> via <source> [dom N chars, text M chars]` — code `empty.extraction`; a render produced no usable text (whitespace-only, or markup with no readable text for text types). `type: "html"` is exempt: its payload is markup, so a shell with no visible text still returns its DOM.
   - `FetchError: deadline.hit: search timed out after <ms>ms (query: ...)`
   - `FetchError: deadline.hit: fetch timed out after <ms>ms for <url>`
   - `FetchError: resume token expired or unknown: <token>`
