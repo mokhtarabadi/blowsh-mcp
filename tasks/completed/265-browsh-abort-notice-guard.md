@@ -217,5 +217,5 @@ Recovering the real HTTP status for 404/500. Browsh answers 200 for everything, 
 ## Factual Git Diff
 
 <!-- BEGIN_GIT_DIFF -->
-**Factual Git Diff:** Stored in Commit Hash: `d7d2d25a927103139806689c6939db658e40c607`
+**Factual Git Diff:** Stored in Commit Hash: `0950ae9d83dac87cc441b5b51e3579733741029f`
 <!-- END_GIT_DIFF -->
