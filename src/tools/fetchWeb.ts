@@ -18,6 +18,7 @@ import {
   stripMedia,
   applyOffset,
   hasReadableText,
+  isRenderAbortNotice,
 } from "../extract.js";
 import { FetchError, createDeadlineError } from "../errors.js";
 import {
@@ -115,11 +116,18 @@ export interface EmptyExtractionContext {
  *   content worth serving (callers inspect the shell). Only a blank DOM fails.
  * - every text type (plain/markdown/pdf): whitespace-only output fails, and so
  *   does output with no readable text after markup stripping.
+ * - every type: Browsh's own render-abort notice fails. Browsh answers HTTP 200
+ *   with that apology as the whole body when it cannot render a page, and the
+ *   string is readable prose, so without this check a failed render is served
+ *   as the page. See `isRenderAbortNotice`.
  *
  * Pure, so the contract is testable without Browsh or html2markdown.
  */
 export function hasUsableExtraction(content: string, type: string): boolean {
   if (content.trim().length === 0) return false;
+  // Applies to every type: an abort notice is a failed render regardless of
+  // the shape the caller asked for, and serving it as `html` is just as wrong.
+  if (isRenderAbortNotice(content)) return false;
   if (type === "html") return true;
   return hasReadableText(content);
 }

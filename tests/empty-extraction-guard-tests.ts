@@ -18,8 +18,8 @@
  *  - a healthy ~17 KB markdown body passes untouched
  */
 
-import { hasReadableText } from "../src/extract.js";
-import { guardEmptyExtraction } from "../src/tools/fetchWeb.js";
+import { hasReadableText, isRenderAbortNotice } from "../src/extract.js";
+import { guardEmptyExtraction, hasUsableExtraction } from "../src/tools/fetchWeb.js";
 import { FetchError } from "../src/errors.js";
 
 // ── Harness (mirrors tests/qa-boundary-tests.ts) ───────────────────────────
@@ -68,6 +68,41 @@ check(
 check(
   "paragraph markup has readable text",
   hasReadableText("<main><h1>Moderation</h1><p>The moderations endpoint classifies text.</p></main>") === true
+);
+
+// ── isRenderAbortNotice (Browsh abort body) ────────────────────────────────
+
+console.log("=== isRenderAbortNotice ===");
+
+// The exact body observed from Browsh at the HTTP boundary.
+const ABORT_BODY = "Browsh rendering aborted after 30s timeout. ";
+
+check("observed abort body is detected", isRenderAbortNotice(ABORT_BODY) === true);
+check("abort body without the volatile number is still detected", isRenderAbortNotice("Browsh rendering aborted after 90s timeout.") === true);
+check("a variant wording is detected", isRenderAbortNotice("Browsh rendering aborted.") === true);
+check("empty string is not an abort notice", isRenderAbortNotice("") === false);
+check("whitespace is not an abort notice", isRenderAbortNotice("   \n\t ") === false);
+
+// The over-broad-match guard: a real page that merely discusses timeouts.
+check(
+  "a page discussing render timeouts is NOT an abort notice",
+  isRenderAbortNotice(
+    "<html><body><h1>Debugging timeouts</h1><p>When a headless browser is slow, the render aborted path is worth understanding. Here is how rendering aborted after 30s timeout appears in logs.</p></body></html>"
+  ) === false,
+  "a long page must not be classified as an abort notice"
+);
+
+// ── hasUsableExtraction: abort body fails for every type ───────────────────
+
+console.log("=== hasUsableExtraction (abort body) ===");
+
+for (const type of ["plain", "markdown", "pdf"]) {
+  check(`abort body is not usable for type=${type}`, hasUsableExtraction(ABORT_BODY, type) === false);
+}
+check("abort body is not usable for type=html", hasUsableExtraction(ABORT_BODY, "html") === false);
+check(
+  "a normal body is still usable for type=markdown",
+  hasUsableExtraction("<main><h1>Docs</h1><p>Real content here.</p></main>", "markdown") === true
 );
 
 // ── guardEmptyExtraction: text types ───────────────────────────────────────

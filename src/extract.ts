@@ -121,6 +121,47 @@ export function hasReadableText(html: string): boolean {
   return text.replace(/\s+/g, " ").trim().length > 0;
 }
 
+/**
+ * Detects Browsh's "render gave up" body.
+ *
+ * When Browsh cannot render a page it does NOT fail the request: it answers
+ * HTTP 200 with a short apology as the whole body, e.g.
+ * `"Browsh rendering aborted after 30s timeout."`. That string is ordinary
+ * prose, so a readability check alone accepts it and the caller receives an
+ * apology in place of the page.
+ *
+ * Matching is deliberately keyed on the stable semantic core ("rendering
+ * aborted") rather than the literal sentence or the timeout figure: the `30s`
+ * is Browsh's own internal constant, and coupling to it would let the check
+ * fail silently the moment Browsh changes the number. A real page that merely
+ * discusses a rendering timeout keeps the word "timeout" but never claims to
+ * have aborted its own rendering, so it is not matched.
+ *
+ * Pure and side-effect free so tests can classify a body without a renderer.
+ */
+export function isRenderAbortNotice(content: string): boolean {
+  if (!content) return false;
+  // Strip any markup first so the check is the same for `html` and text types:
+  // the abort body is plain text, but a caller may hand us a wrapped version.
+  const plain = content.replace(/<[^>]*>/g, " ");
+  const normalized = plain.replace(/\s+/g, " ").trim().toLowerCase();
+  if (normalized.length === 0) return false;
+  // The notice IS the whole body — a single short sentence. Two conditions
+  // together make the match safe:
+  //   1. it must start with the notice's subject ("browsh"), so a page that
+  //      merely quotes the phrase in a paragraph or heading never matches;
+  //   2. it must be short, so a real page is never mistaken for the notice.
+  // Both are required: length alone would reject legitimately short pages, and
+  // the phrase alone would fire on any article discussing render failures.
+  if (normalized.length > 200) return false;
+  if (!normalized.startsWith("browsh")) return false;
+  return (
+    normalized.includes("browsh rendering aborted") ||
+    normalized.includes("browsh failed rendering") ||
+    normalized.includes("browsh error rendering")
+  );
+}
+
 /** Extracts the text content of a CSS selector (first match), or null. */
 export function selectText(html: string, selector: string): string | null {
   const $ = load(html);
