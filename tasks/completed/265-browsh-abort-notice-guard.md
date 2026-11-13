@@ -1,9 +1,9 @@
 # Task 265: Browsh abort-notice body bypasses the empty-extraction guard
 
-**File:** `tasks/qa/265-browsh-abort-notice-guard.md`
+**File:** `tasks/completed/265-browsh-abort-notice-guard.md`
 **Source:** manager
 **Type:** bugfix
-**Status:** open
+**Status:** closed
 **Finished:** 2026-11-13T19:10:16Z
 **Submitted:** 2026-11-13T19:09:27Z
 **Started:** 2026-11-13T19:09:08Z
