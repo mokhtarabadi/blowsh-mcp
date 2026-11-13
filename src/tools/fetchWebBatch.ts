@@ -1,3 +1,4 @@
+// Sibling Docs: src/tools/README.md | Decisions: src/tools/DECISIONS.md
 import { fetchWeb, type FetchWebOptions } from "./fetchWeb.js";
 import { FetchError, toFetchErrorMessage } from "../errors.js";
 

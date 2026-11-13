@@ -105,8 +105,8 @@ Scan `.opencode/skills/*/SKILL.md` on every audit and keep this table current �
 - **Buffer Isolation:** The shared validation phase MUST include a buffer-flush directive requiring Hands to treat every task as contextually independent, preventing cross-task context leakage.
 - **MCP Report Generation:** Agents MUST generate context reports (`custom_context_read_source_files`) and tree reports (`custom_context_create_tree_report` — "create a tree of the project") via the MCP server and hand the file path to the Manager instead of reading `context-reports/` files inline.
 - **UI/UX Enforcement:** Any UI/UX changes MUST enforce the guidelines defined in the project's `DESIGN.md`.
-- **Complex Debugging:** Agents MUST be instructed not to guess blindly on complex bugs, but instead utilize the `debug-instrumentation` skill.
-- **Bilingual Prompt Refactoring & Brainstorming Protocol:** Agents MUST be instructed not to execute raw, informal, or non-English prompts directly. The `prompt-refactor` skill must be loaded, or the Phase 1.5 Multi-Agent Brainstorming Protocol triggered, to translate and expand intent first. Standard XML task blocks are exempt.
+- **Complex Debugging:** Do not guess blindly on complex bugs, deadlocks, or silent timeouts. Load the `debug-instrumentation` skill to inject strategic logs and trace the runtime execution path.
+- **Bilingual Prompt Refactoring & Brainstorming Protocol:** Do not execute raw, informal, or non-English prompts directly. Load the `prompt-refactor` skill to translate and expand the intent first, or trigger the Phase 1.5 Multi-Agent Brainstorming Protocol for cross-disciplinary ambiguity. Standard XML task blocks are exempt.
 
 ## 🛑 CONTEXT BOOTSTRAPPING
 

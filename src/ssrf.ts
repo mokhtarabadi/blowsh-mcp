@@ -1,3 +1,4 @@
+// Sibling Docs: src/README.md | Decisions: src/DECISIONS.md
 import dns from "node:dns/promises";
 import net from "node:net";
 import { FetchError } from "./errors.js";

@@ -1,3 +1,4 @@
+// Sibling Docs: src/README.md | Decisions: src/DECISIONS.md
 import { spawn } from "child_process";
 
 /**

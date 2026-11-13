@@ -1,3 +1,4 @@
+// Sibling Docs: src/tools/README.md | Decisions: src/tools/DECISIONS.md
 import { load } from "cheerio";
 import { browshManager } from "../browshManager.js";
 import { assertSafeUrl } from "../ssrf.js";

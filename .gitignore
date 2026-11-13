@@ -87,3 +87,10 @@ context-reports/
 
 # Brain session transcripts (per-project runtime state, never committed)
 tasks/.sessions/
+
+# Goal plugin runtime state (per-session goal + evidence sidecars, external scratch)
+.opencode/goals/
+.opencode/goal-state.json
+.opencode/goal-evidence.json
+.opencode/STOP_GOAL
+STOP_GOAL

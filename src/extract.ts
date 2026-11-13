@@ -1,3 +1,4 @@
+// Sibling Docs: src/README.md | Decisions: src/DECISIONS.md
 import { load, type CheerioAPI } from "cheerio";
 import type { Element } from "domhandler";
 

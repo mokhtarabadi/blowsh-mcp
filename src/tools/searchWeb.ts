@@ -1,8 +1,10 @@
+// Sibling Docs: src/tools/README.md | Decisions: src/tools/DECISIONS.md
 import { load } from "cheerio";
 import axios from "axios";
 import { browshManager } from "../browshManager.js";
 import { assertSafeUrl } from "../ssrf.js";
 import { FetchError, createDeadlineError, isDeadlineHitError } from "../errors.js";
+import { TtlCache } from "../cache.js";
 import { fetchWeb } from "./fetchWeb.js";
 
 /**
@@ -29,7 +31,86 @@ export interface SearchResult {
 }
 
 /** Total wall-clock budget for the enrichment phase (ms). Overridable via ENRICH_BUDGET_MS. */
-const ENRICH_BUDGET_MS = Number(process.env.ENRICH_BUDGET_MS ?? 45_000);
+export const ENRICH_BUDGET_MS = intEnvOrDefault(process.env.ENRICH_BUDGET_MS, 180_000);
+
+/**
+ * Parse an integer env var with a fallback. Unlike `Number(...)` this rejects
+ * NaN, so a typo like `SEARCH_DEADLINE_MS=9e5s` cannot produce a NaN budget —
+ * which would make `setTimeout(fn, NaN)` fire in ~1 ms and abort every search
+ * instantly.
+ */
+function intEnvOrDefault(raw: string | undefined, fallback: number): number {
+  const n = Number.parseInt(raw ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * Default wall-clock budget for one search when the caller sets no deadline.
+ * A search always ends in results or an honest `deadline.hit` — never an
+ * unbounded hang. Overridable via SEARCH_DEADLINE_MS.
+ *
+ * MUST exceed `BROWSH_QUEUE_TIMEOUT_MS` + `BROWSH_REQUEST_TIMEOUT_MS` (the
+ * worst wait a single render can face before it even starts): a budget below
+ * that can only ever abort renders that were still legitimately queued, which
+ * is the failure this whole ladder exists to prevent.
+ */
+const DEFAULT_SEARCH_DEADLINE_MS = intEnvOrDefault(process.env.SEARCH_DEADLINE_MS, 900_000);
+
+/** Hard ceiling for the search budget — matches the `deadline_ms` schema cap. */
+export const MAX_SEARCH_DEADLINE_MS = 1_800_000;
+
+/**
+ * Engine ids in tier order. The blocked-engine breaker keys on these ids.
+ */
+const ENGINE_IDS = ["google", "startpage", "brave", "mojeek", "bing", "ddg"] as const;
+
+/**
+ * Engines that answered with a bot-block page are remembered for a short TTL
+ * so a known-dead engine stops costing a render on every search. The render
+ * mutex serializes all engines, so a blocked tier is pure latency: two dead
+ * tiers per query doubled the wall clock of every search.
+ */
+const blockedEngines = new TtlCache<string, true>(
+  Number(process.env.SEARCH_BLOCKED_ENGINE_TTL_MS) || 600_000
+);
+
+/**
+ * Resolves the wall-clock budget for one search. An explicit `deadline_ms`
+ * wins; otherwise the default applies, so the tool never runs unbounded.
+ */
+export function resolveSearchDeadline(deadlineMs?: number): number {
+  const requested =
+    deadlineMs !== undefined && deadlineMs > 0 ? deadlineMs : DEFAULT_SEARCH_DEADLINE_MS;
+  return Math.max(500, Math.min(MAX_SEARCH_DEADLINE_MS, requested));
+}
+
+/**
+ * True when the engine is remembered as blocked AND the breaker is allowed to
+ * act. The breaker may only skip an engine while another candidate is not
+ * known-blocked, so it can never turn a working search into an empty one.
+ */
+export function isEngineSkipped(id: string, breakerArmed: boolean): boolean {
+  return breakerArmed && blockedEngines.get(id) === true;
+}
+
+/** Records that an engine answered with a bot-block page. */
+export function markEngineBlocked(id: string): void {
+  blockedEngines.set(id, true);
+}
+
+/**
+ * True when the breaker may act: at least one candidate engine is not
+ * remembered as blocked. When this is false no engine is skipped at all, so
+ * the breaker can never turn a working search into an empty one.
+ */
+export function isBreakerArmed(ids: readonly string[] = ENGINE_IDS): boolean {
+  return ids.some((id) => !blockedEngines.get(id));
+}
+
+/** Clears the remembered blocked engines (test seam). */
+export function resetBlockedEngines(): void {
+  blockedEngines.clear();
+}
 
 // Simple in-memory query cache (intent-aware)
 const queryCache = new Map<string, { at: number; results: SearchResult[] }>();
@@ -592,26 +673,47 @@ async function fetchInstantAnswer(query: string): Promise<string | null> {
   }
 }
 
+/** Outcome of one engine render. */
+interface EngineRender {
+  /** Organic results parsed from the rendered page. */
+  results: SearchResult[];
+  /** True when the engine answered with a bot-block page instead of results. */
+  blocked: boolean;
+}
+
 /**
  * Renders one search engine page and parses its organic results. Bounded by
- * the shared browser mutex; cancellable via `signal` so the sibling engine
- * fetch can be aborted once the first engine returns results. An aborted
- * sibling resolves to `[]` (not an error); real failures rethrow.
+ * the shared browser mutex; cancellable via `signal` so a sibling engine fetch
+ * can be aborted once the budget expires. An aborted sibling resolves to an
+ * empty (not blocked) render — never an error; real failures rethrow.
+ *
+ * A bot-block page is recorded in the blocked-engine breaker, so the next
+ * search skips that engine instead of paying another serialized render for it.
  */
 async function renderEngine(
-  engine: { url: string; parse: (html: string) => SearchResult[] },
+  engine: { id: string; url: string; parse: (html: string) => SearchResult[] },
   signal?: AbortSignal
-): Promise<SearchResult[]> {
+): Promise<EngineRender> {
   await assertSafeUrl(engine.url);
   try {
     await browshManager.ensureStarted();
     const dom = await browshManager.fetchDom(engine.url, signal);
-    if (isBlockedPage(dom)) return [];
-    return engine.parse(dom);
+    if (isBlockedPage(dom)) {
+      markEngineBlocked(engine.id);
+      return { results: [], blocked: true };
+    }
+    return { results: engine.parse(dom), blocked: false };
   } catch (e) {
-    // An aborted sibling is not an error — the other engine already won.
-    if (axios.isCancel(e) || (axios.isAxiosError(e) && e.code === "ERR_CANCELED")) {
-      return [];
+    // An aborted render is not an error — the budget fired, or a sibling
+    // engine already won. The signal check also covers a render cancelled
+    // while it was queued behind the browser mutex: that path throws a
+    // FetchError, not an axios cancellation.
+    if (
+      axios.isCancel(e) ||
+      (axios.isAxiosError(e) && e.code === "ERR_CANCELED") ||
+      signal?.aborted
+    ) {
+      return { results: [], blocked: false };
     }
     throw e;
   }
@@ -681,9 +783,11 @@ async function searchSingleQuery(
   page: number,
   enrich: boolean,
   intent: SearchIntent,
-  deadlineMs?: number,
+  deadlineMs: number,
+  externalSignal?: AbortSignal,
   retried = false
 ): Promise<SearchResult[]> {
+  const startedAt = Date.now();
   const cacheKey = cacheKeyForQuery(query, intent);
   const cached = queryCache.get(cacheKey);
   const ttl = intentCacheTtl(intent, query);
@@ -704,6 +808,20 @@ async function searchSingleQuery(
 
   const controller = new AbortController();
   const deadlineTimer = deadlineMs ? setTimeout(() => controller.abort(), deadlineMs) : null;
+  // The caller's signal (the outer search budget) aborts the inner renders
+  // too, so a search that runs out of budget stops holding the browser mutex
+  // instead of rendering on in the background.
+  const onExternalAbort = (): void => controller.abort();
+  if (externalSignal?.aborted) {
+    controller.abort();
+  } else {
+    externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
+  }
+
+  // The blocked-engine breaker may only skip an engine while another
+  // candidate is not known-blocked, so it can never turn a working search
+  // into an empty one.
+  const breakerArmed = isBreakerArmed();
 
   try {
     // 1. Kick off direct-HTTP calls in parallel (no Browsh mutex contention)
@@ -717,14 +835,19 @@ async function searchSingleQuery(
     // 2. Tier 1: Google (Primary attempt)
     // If Google succeeds and returns clean results, short-circuit immediately.
     const googleEngine = {
+      id: "google",
       url: googleSearchUrl(query, page),
       parse: (html: string) => parseGoogle(html, "https://www.google.com/"),
     };
 
     try {
-      const googleRes = await renderEngine(googleEngine, controller.signal);
-      if (googleRes.length > 0) {
-        engineResults.push(googleRes);
+      if (isEngineSkipped("google", breakerArmed)) {
+        console.error("[searchWeb] skipping tier-1 google: remembered as blocked");
+      } else {
+        const googleRender = await renderEngine(googleEngine, controller.signal);
+        if (googleRender.results.length > 0) {
+          engineResults.push(googleRender.results);
+        }
       }
     } catch (e) {
       if (!axios.isCancel(e) && !(axios.isAxiosError(e) && e.code === "ERR_CANCELED")) {
@@ -736,13 +859,18 @@ async function searchSingleQuery(
     // If Google was robot-blocked or yielded 0 results, try Startpage.
     if (engineResults.length === 0 && !controller.signal.aborted) {
       const startpageEngine = {
+        id: "startpage",
         url: startpageSearchUrl(query, page),
         parse: (html: string) => parseStartpage(html, "https://www.startpage.com/"),
       };
       try {
-        const startpageRes = await renderEngine(startpageEngine, controller.signal);
-        if (startpageRes.length > 0) {
-          engineResults.push(startpageRes);
+        if (isEngineSkipped("startpage", breakerArmed)) {
+          console.error("[searchWeb] skipping tier-2 startpage: remembered as blocked");
+        } else {
+          const startpageRender = await renderEngine(startpageEngine, controller.signal);
+          if (startpageRender.results.length > 0) {
+            engineResults.push(startpageRender.results);
+          }
         }
       } catch (e) {
         if (!axios.isCancel(e) && !(axios.isAxiosError(e) && e.code === "ERR_CANCELED")) {
@@ -755,19 +883,26 @@ async function searchSingleQuery(
     // Only triggered if both Google and Startpage failed or were blocked.
     if (engineResults.length === 0 && !controller.signal.aborted) {
       const fallbackEngines = [
-        { url: braveSearchUrl(query, page), parse: (html: string) => parseBrave(html, "https://search.brave.com/") },
-        { url: mojeekSearchUrl(query, page), parse: (html: string) => parseMojeek(html, "https://www.mojeek.com/") },
-        { url: bingSearchUrl(query, page), parse: (html: string) => parseBing(html, "https://www.bing.com/") },
-        { url: ddgSearchUrl(query, page), parse: (html: string) => parseDuckDuckGo(html, "https://duckduckgo.com/") },
+        { id: "brave", url: braveSearchUrl(query, page), parse: (html: string) => parseBrave(html, "https://search.brave.com/") },
+        { id: "mojeek", url: mojeekSearchUrl(query, page), parse: (html: string) => parseMojeek(html, "https://www.mojeek.com/") },
+        { id: "bing", url: bingSearchUrl(query, page), parse: (html: string) => parseBing(html, "https://www.bing.com/") },
+        { id: "ddg", url: ddgSearchUrl(query, page), parse: (html: string) => parseDuckDuckGo(html, "https://duckduckgo.com/") },
       ];
 
+      // Skip pool engines the breaker remembers as blocked, but never empty the
+      // pool: if every engine is known-blocked, try them all anyway.
+      const liveEngines = fallbackEngines.filter(
+        (engine) => !isEngineSkipped(engine.id, breakerArmed)
+      );
+      const poolEngines = liveEngines.length > 0 ? liveEngines : fallbackEngines;
+
       const poolOutcomes = await Promise.allSettled(
-        fallbackEngines.map(async (engine) => renderEngine(engine, controller.signal))
+        poolEngines.map(async (engine) => renderEngine(engine, controller.signal))
       );
 
       for (const o of poolOutcomes) {
-        if (o.status === "fulfilled" && o.value.length > 0) {
-          engineResults.push(o.value);
+        if (o.status === "fulfilled" && o.value.results.length > 0) {
+          engineResults.push(o.value.results);
         }
       }
     }
@@ -807,19 +942,28 @@ async function searchSingleQuery(
     if (merged.length === 0 && !instantAnswer && !retried && (intent === "news" || intent === "entity")) {
       const simple = simplifyQuery(query);
       if (simple && simple.toLowerCase() !== query.toLowerCase().replace(/\s+/g, " ").trim()) {
-        return searchSingleQuery(simple, maxResults, page, enrich, "web", deadlineMs, true);
+        return searchSingleQuery(simple, maxResults, page, enrich, "web", deadlineMs, externalSignal, true);
       }
     }
 
     // Enrichment: replace the top-3 organic snippets with fetched main-content
-    // markdown. Best-effort, sequential, and hard-bounded by a wall-clock budget
+    // markdown. Best-effort, sequential, and hard-bounded by a wall-clock budget.
+    // The phase is clamped to the remaining search budget and each fetch
+    // inherits it, so enrichment can never outlive the search it belongs to.
     if (enrich && merged.length > 0) {
-      const deadline = Date.now() + ENRICH_BUDGET_MS;
+      const budgetEnd = startedAt + deadlineMs;
+      const enrichEnd = Math.min(budgetEnd, Date.now() + ENRICH_BUDGET_MS);
       for (const result of merged.slice(0, 3)) {
-        if (Date.now() > deadline) break;
+        const remaining = enrichEnd - Date.now();
+        if (remaining < 1_000) break;
         if (controller.signal.aborted) break;
         try {
-          const markdown = await fetchWeb({ url: result.url, type: "markdown", max_chars: 1500 });
+          const markdown = await fetchWeb({
+            url: result.url,
+            type: "markdown",
+            max_chars: 1500,
+            deadline_ms: remaining,
+          });
           result.snippet = markdown.trim();
         } catch (e) {
           console.error(`[searchWeb] Enrichment failed for ${result.url}: ${e instanceof Error ? e.message : String(e)}`);
@@ -845,6 +989,7 @@ async function searchSingleQuery(
     return sliced;
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
   }
 }
 
@@ -858,6 +1003,11 @@ async function searchSingleQuery(
  * merged by consensus (cross-engine agreement) + dedup, rather than winner-takes-all.
  * Intent verticals (github, wikipedia, arxiv, hn) are added when intent dictates.
  * Query variants run in parallel and are merged.
+ *
+ * Every search runs under a wall-clock budget: the caller's `deadline_ms`
+ * when given, otherwise `SEARCH_DEADLINE_MS` (default 900000 ms). When the budget
+ * expires the in-flight renders are aborted — so a timed-out search stops
+ * holding the browser mutex — and the call ends in an honest `deadline.hit`.
  */
 export async function searchWeb(
   query: string,
@@ -873,6 +1023,16 @@ export async function searchWeb(
   const currentPage = Math.max(1, Math.min(10, page));
   const resolvedIntent = detectIntent(query, intent);
 
+  // Wall-clock budget for the whole search. An explicit `deadline_ms` wins;
+  // otherwise the default applies, so a search never runs unbounded.
+  const budgetMs = resolveSearchDeadline(deadlineMs);
+  const startedAt = Date.now();
+
+  // One controller for the whole search: when the budget expires it aborts
+  // every in-flight render, so a timed-out search stops holding the browser
+  // mutex instead of rendering on in the background.
+  const budgetController = new AbortController();
+
   // Deadline wrapper for the whole operation (honest deadline error, never hang)
   const run = async (): Promise<SearchResult[]> => {
     // Handle query variants: base + up to 2 variants in parallel, merged
@@ -880,7 +1040,7 @@ export async function searchWeb(
     const queries = [query, ...variants];
 
     if (queries.length === 1) {
-      return searchSingleQuery(query, max, currentPage, enrich, resolvedIntent, deadlineMs);
+      return searchSingleQuery(query, max, currentPage, enrich, resolvedIntent, budgetMs, budgetController.signal);
     }
 
     // Variants: search each query in parallel, then merge per-query result sets with dedup across variants
@@ -889,7 +1049,7 @@ export async function searchWeb(
     // fallback); swallowing it into [] would re-introduce the bare-[] bug.
     const perQueryResults = await Promise.all(
       queries.map((q) =>
-        searchSingleQuery(q, max, currentPage, false, resolvedIntent, deadlineMs).catch((e: unknown) => {
+        searchSingleQuery(q, max, currentPage, false, resolvedIntent, budgetMs, budgetController.signal).catch((e: unknown) => {
           if (isDeadlineHitError(e)) throw e;
           return [] as SearchResult[];
         })
@@ -899,13 +1059,20 @@ export async function searchWeb(
     // Merge across variants: dedup by URL, keep highest consensus
     const flatMerged = mergeResults(perQueryResults);
 
-    // Enrich after merge if requested (once)
+    // Enrich after merge if requested (once), clamped to the search budget.
     if (enrich && flatMerged.length > 0) {
-      const deadline = Date.now() + ENRICH_BUDGET_MS;
+      const budgetEnd = startedAt + budgetMs;
+      const enrichEnd = Math.min(budgetEnd, Date.now() + ENRICH_BUDGET_MS);
       for (const result of flatMerged.slice(0, 3)) {
-        if (Date.now() > deadline) break;
+        const remaining = enrichEnd - Date.now();
+        if (remaining < 1_000) break;
         try {
-          const markdown = await fetchWeb({ url: result.url, type: "markdown", max_chars: 1500 });
+          const markdown = await fetchWeb({
+            url: result.url,
+            type: "markdown",
+            max_chars: 1500,
+            deadline_ms: remaining,
+          });
           result.snippet = markdown.trim();
         } catch { /* ignore */ }
       }
@@ -916,27 +1083,41 @@ export async function searchWeb(
     return flatMerged.slice(0, max);
   };
 
-  if (deadlineMs && deadlineMs > 0) {
-    const timeoutMs = Math.max(500, Math.min(600_000, deadlineMs));
-    const deadlineError = createDeadlineError(`deadline.hit: search timed out after ${timeoutMs}ms (query: ${query})`);
-    return Promise.race([
-      run(),
-      new Promise<SearchResult[]>((_, reject) => setTimeout(() => reject(deadlineError), timeoutMs)),
-    ]).catch(async (e) => {
-      // Deadline with zero data is the worst failure mode: try a cheap
-      // browser-free fallback (plain HTTP engine pages) and return whatever
-      // it yields as partial results. Only throw when fallback is empty too.
-      if (!isDeadlineHitError(e)) throw e;
-      try {
-        const partial = await fetchCheapFallback(query, max);
-        if (partial.length > 0) {
-          console.error(`[searchWeb] deadline.hit — returning ${partial.length} cheap-fallback partial results`);
-          return partial;
-        }
-      } catch { /* fall through to original error */ }
-      throw e;
-    });
-  }
+  const deadlineError = createDeadlineError(
+    `deadline.hit: search timed out after ${budgetMs}ms (query: ${query})`
+  );
 
-  return run();
+  let budgetTimer: ReturnType<typeof setTimeout> | null = null;
+  const budgetPromise = new Promise<SearchResult[]>((_, reject) => {
+    // Deliberately NOT unref()ed, matching the RenderQueue timer: a budget
+    // that can be starved of the event loop is not a budget. If this timer
+    // were the only referenced handle it would never fire, and the search
+    // would hang past its own deadline. The timer is always cleared in the
+    // finally below, so keeping it referenced costs nothing.
+    budgetTimer = setTimeout(() => {
+      // Abort first: the in-flight renders release the browser mutex instead of
+      // rendering on for another full budget after the caller gave up.
+      budgetController.abort();
+      reject(deadlineError);
+    }, budgetMs);
+  });
+
+  try {
+    return await Promise.race([run(), budgetPromise]);
+  } catch (e) {
+    // Deadline with zero data is the worst failure mode: try a cheap
+    // browser-free fallback (plain HTTP engine pages) and return whatever
+    // it yields as partial results. Only throw when fallback is empty too.
+    if (!isDeadlineHitError(e)) throw e;
+    try {
+      const partial = await fetchCheapFallback(query, max);
+      if (partial.length > 0) {
+        console.error(`[searchWeb] deadline.hit — returning ${partial.length} cheap-fallback partial results`);
+        return partial;
+      }
+    } catch { /* fall through to original error */ }
+    throw e;
+  } finally {
+    if (budgetTimer) clearTimeout(budgetTimer);
+  }
 }

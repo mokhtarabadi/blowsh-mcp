@@ -1,3 +1,4 @@
+// Sibling Docs: src/README.md | Decisions: src/DECISIONS.md
 /**
  * Bot-wall / guard detection for rendered page content.
  *

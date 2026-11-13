@@ -1,3 +1,4 @@
+// Sibling Docs: src/README.md | Decisions: src/DECISIONS.md
 /** Small in-memory TTL cache. */
 export class TtlCache<K, V> {
   private store = new Map<K, { expiresAt: number; value: V }>();

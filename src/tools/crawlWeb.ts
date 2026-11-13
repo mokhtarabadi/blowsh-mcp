@@ -1,3 +1,4 @@
+// Sibling Docs: src/tools/README.md | Decisions: src/tools/DECISIONS.md
 import axios from "axios";
 import { load } from "cheerio";
 import { browshManager } from "../browshManager.js";

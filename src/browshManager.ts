@@ -1,3 +1,4 @@
+// Sibling Docs: src/README.md | Decisions: src/DECISIONS.md
 import { spawn, ChildProcess } from "child_process";
 import axios from "axios";
 import { FetchError } from "./errors.js";
@@ -68,6 +69,159 @@ function cleanPlainText(text: string): string {
 }
 
 /**
+ * Default budgets for the render path (ms). Exported so the ladder can be
+ * asserted in one place: these three plus `SEARCH_DEADLINE_MS` must satisfy
+ * `searchDeadline >= queueWait + render`, or a render can be aborted while it
+ * was still legitimately queued.
+ */
+export const DEFAULT_RENDER_TIMEOUT_MS = 180_000;
+export const DEFAULT_QUEUE_TIMEOUT_MS = 600_000;
+export const DEFAULT_STARTUP_TIMEOUT_MS = 120_000;
+
+/**
+ * Resolve the render-path budgets the same way the constructor does, so a test
+ * can assert the ladder invariant on the values that actually run — not just on
+ * the defaults. An env combination that clamps each knob into its own band but
+ * breaks `search >= queue + render` must fail the assertion.
+ */
+export function resolveRenderTimeouts(env: NodeJS.ProcessEnv = process.env): {
+  render: number;
+  queue: number;
+  startup: number;
+} {
+  return {
+    render: clampIntEnv(env.BROWSH_REQUEST_TIMEOUT_MS, 10_000, 600_000, DEFAULT_RENDER_TIMEOUT_MS, "BROWSH_REQUEST_TIMEOUT_MS"),
+    queue: clampIntEnv(env.BROWSH_QUEUE_TIMEOUT_MS, 10_000, 1_200_000, DEFAULT_QUEUE_TIMEOUT_MS, "BROWSH_QUEUE_TIMEOUT_MS"),
+    startup: clampIntEnv(env.BROWSH_STARTUP_TIMEOUT_MS, 10_000, 600_000, DEFAULT_STARTUP_TIMEOUT_MS, "BROWSH_STARTUP_TIMEOUT_MS"),
+  };
+}
+
+/**
+ * One render queued behind the browser mutex.
+ *
+ * `aborted` marks a waiter that gave up while it was still queued (the
+ * caller's signal fired, or the queue budget expired). Such a waiter stays in
+ * the queue so the FIFO accounting stays intact, but `release()` must skip it:
+ * the mutex is handed to a live waiter, never to a dead one.
+ */
+interface Waiter {
+  resolve: (granted: boolean) => void;
+  aborted: boolean;
+}
+
+/** Outcome of a mutex acquisition attempt. */
+interface AcquireOutcome {
+  /** True when the mutex was granted and the caller may render. */
+  granted: boolean;
+  /** Why the wait ended without the mutex (absent when granted). */
+  reason?: "aborted" | "queue-timeout";
+}
+
+/**
+ * FIFO queue guarding the single Browsh render slot.
+ *
+ * Every render is serialized, so a queued render's wait is bounded two ways:
+ * the caller's `AbortSignal` (a fired deadline) and the queue budget. A waiter
+ * that gives up stays in the queue marked `aborted`; `release()` skips it, so
+ * the slot is always handed to a live waiter and never to a dead one.
+ *
+ * Exported for tests: the bounded/abortable wait is the contract that keeps a
+ * parallel search from hanging, and it is provable without a browser.
+ */
+export class RenderQueue {
+  private busy = false;
+  private waiting: Waiter[] = [];
+
+  constructor(private readonly queueTimeoutMs: number) {}
+
+  /** True while a render holds the slot. */
+  get isBusy(): boolean {
+    return this.busy;
+  }
+
+  /** Number of waiters still queued (including ones that gave up). */
+  get pending(): number {
+    return this.waiting.length;
+  }
+
+  /**
+   * Acquire the slot. Resolves `granted: true` when the slot is taken, or
+   * `granted: false` with a reason when the caller aborted or the queue budget
+   * expired — in which case the slot was never taken and nothing must be
+   * released by the caller.
+   */
+  acquire(signal?: AbortSignal): Promise<AcquireOutcome> {
+    if (signal?.aborted) {
+      return Promise.resolve({ granted: false, reason: "aborted" });
+    }
+    if (!this.busy) {
+      this.busy = true;
+      return Promise.resolve({ granted: true });
+    }
+    return new Promise<AcquireOutcome>((resolve) => {
+      const waiter: Waiter = { resolve: () => undefined, aborted: false };
+      let settled = false;
+
+      /** Settle the promise exactly once and release the waiter's resources. */
+      const settle = (granted: boolean, reason?: AcquireOutcome["reason"]): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(reason ? { granted, reason } : { granted });
+      };
+
+      /** Give up on the wait: the caller aborted, or the queue budget expired. */
+      const giveUp = (reason: AcquireOutcome["reason"], detail: string): void => {
+        if (settled) return;
+        waiter.aborted = true;
+        console.error("[browshManager] queue wait ended early: %s", detail);
+        settle(false, reason);
+      };
+
+      function onAbort(): void {
+        giveUp("aborted", "caller aborted while queued");
+      }
+
+      waiter.resolve = (granted: boolean): void => {
+        if (granted) {
+          waiter.aborted = false;
+          settle(true);
+        } else {
+          settle(false);
+        }
+      };
+
+      // Deliberately NOT unref()ed: a queued wait must still fire its timeout
+      // even if nothing else holds the event loop, or the queue budget becomes
+      // a lie in a short-lived process (a queued render would hang instead of
+      // failing honestly). The render itself holds the loop while in flight,
+      // so keeping this handle referenced costs nothing.
+      const timer = setTimeout(
+        () => giveUp("queue-timeout", `queue timeout after ${this.queueTimeoutMs}ms`),
+        this.queueTimeoutMs
+      );
+
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.waiting.push(waiter);
+    });
+  }
+
+  /** Release the slot, handing control to the first live waiter if any. */
+  release(): void {
+    // Skip waiters that gave up while queued (aborted, or queue timeout): the
+    // slot must be handed to a live waiter, never to a dead one.
+    while (this.waiting.length > 0) {
+      const next = this.waiting.shift()!;
+      if (next.aborted) continue;
+      next.resolve(true);
+      return;
+    }
+    this.busy = false;
+  }
+}
+
+/**
  * Manages the single Browsh instance lifecycle: lazy start, health probing,
  * request serialization (mutex), request-count-based recycling, and idle kill.
  *
@@ -86,6 +240,7 @@ class BrowshManager {
   private readonly firefoxPath: string;
   private readonly healthPath: string = "/";
   private readonly requestTimeoutMs: number;
+  private readonly queueTimeoutMs: number;
   private readonly startupTimeoutMs: number;
   private readonly recycleThreshold: number;
   private readonly idleTimeoutMs: number;
@@ -94,8 +249,7 @@ class BrowshManager {
   private readonly rows: number;
 
   private requestCount = 0;
-  private busy = false;
-  private waiting: Array<() => void> = [];
+  private readonly queue: RenderQueue;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private lastCycleAt = 0;
 
@@ -103,12 +257,32 @@ class BrowshManager {
     // Get path from env or default to "firefox"
     this.firefoxPath =
       firefoxPath || process.env.BROWSH_FIREFOX_PATH || "firefox";
-    this.requestTimeoutMs = Number(process.env.BROWSH_REQUEST_TIMEOUT_MS) || 30_000;
+    // Per-render timeout. Raised from 30s: a rendered search-engine page
+    // routinely takes 10-20s on a cold or busy host, and a 30s cap turned a
+    // merely slow page into a failed render. Raised again to 180s for slow
+    // hosts behind heavy JS pages. The mutex queue wait is bounded separately
+    // (BROWSH_QUEUE_TIMEOUT_MS), so a slow render cannot become an unbounded
+    // hang.
+    //
+    // All three render-path budgets come from one resolver so the values that
+    // run are the values a test can assert the ladder invariant on.
+    const budgets = resolveRenderTimeouts();
+    this.requestTimeoutMs = budgets.render;
+    // Queue-wait budget: how long a render may sit behind the mutex before it
+    // fails with an honest error. The per-render timeout only starts once the
+    // mutex is granted, so without this bound a queued render could wait
+    // indefinitely while the caller saw nothing at all.
+    //
+    // MUST stay >= BROWSH_REQUEST_TIMEOUT_MS * 2: the worst single-query chain
+    // queues a render behind another render, and a queue budget smaller than
+    // one render can only ever produce false timeouts. The search budget
+    // (SEARCH_DEADLINE_MS) must in turn exceed this value plus one render.
+    this.queueTimeoutMs = budgets.queue;
     // Cold-start budget for the Browsh HTTP endpoint. Measured 31s on a warm
     // profile in the fat image, so the old hardcoded 30s window killed the
     // browser about one second before it was ready and every first fetch after
-    // a container start failed. Configurable; default leaves real headroom.
-    this.startupTimeoutMs = clampIntEnv(process.env.BROWSH_STARTUP_TIMEOUT_MS, 10_000, 300_000, 60_000, "BROWSH_STARTUP_TIMEOUT_MS");
+    // a container start failed. Raised to 120s for slow hosts. Configurable.
+    this.startupTimeoutMs = budgets.startup;
     this.recycleThreshold = Number(process.env.BROWSH_RECYCLE_REQUESTS) || 100;
     this.idleTimeoutMs = Number(process.env.BROWSH_IDLE_TIMEOUT_MS) || 600_000;
     // Persistent Firefox profile: Browsh 1.8.0 offers no profile-dir flag, so
@@ -120,6 +294,7 @@ class BrowshManager {
     // the explicit 160x60 env replaces any 80x24 fallback in the launcher path.
     this.cols = clampIntEnv(process.env.BROWSH_COLS, 80, 250, 160, "BROWSH_COLS");
     this.rows = clampIntEnv(process.env.BROWSH_ROWS, 24, 100, 60, "BROWSH_ROWS");
+    this.queue = new RenderQueue(this.queueTimeoutMs);
   }
 
   /** Start Browsh if not running. */
@@ -233,29 +408,18 @@ class BrowshManager {
   }
 
   /**
-   * Acquire the busy mutex. Browsh requests are strictly serialized: if a
-   * request is in flight, waiters queue in FIFO order. This guarantees any
-   * recycle/idle-kill decided later only ever sees a quiescent process.
+   * Acquire the render slot. Delegates to the queue, which bounds the wait by
+   * the caller's signal and the queue budget. See {@link RenderQueue.acquire}.
    */
-  private async acquire(): Promise<void> {
-    console.error("[browshManager] acquire (busy=%s, waiting=%d)", this.busy, this.waiting.length);
-    if (!this.busy) {
-      this.busy = true;
-      return;
-    }
-    return new Promise<void>((resolve) => {
-      this.waiting.push(resolve);
-    });
+  private acquire(signal?: AbortSignal): Promise<AcquireOutcome> {
+    console.error("[browshManager] acquire (busy=%s, waiting=%d)", this.queue.isBusy, this.queue.pending);
+    return this.queue.acquire(signal);
   }
 
-  /** Release the mutex, handing control to the first waiter if any. */
+  /** Release the render slot, handing control to the first live waiter. */
   private release(): void {
-    console.error("[browshManager] release (waiting=%d)", this.waiting.length);
-    if (this.waiting.length > 0) {
-      this.waiting.shift()!();
-    } else {
-      this.busy = false;
-    }
+    console.error("[browshManager] release (waiting=%d)", this.queue.pending);
+    this.queue.release();
   }
 
   /**
@@ -269,7 +433,18 @@ class BrowshManager {
     mode: "PLAIN" | "DOM",
     signal?: AbortSignal
   ): Promise<string> {
-    await this.acquire();
+    const outcome = await this.acquire(signal);
+    if (!outcome.granted) {
+      // The wait ended without the mutex: the request was aborted, or it sat
+      // behind the mutex past the queue budget. No render was attempted and the
+      // mutex was never taken, so nothing is released here.
+      throw new FetchError(
+        outcome.reason === "aborted"
+          ? "Render cancelled: the request was aborted before it could acquire the browser"
+          : `Render failed: the request waited behind the browser mutex for more than ${this.queueTimeoutMs}ms without being served`,
+        { url }
+      );
+    }
     try {
       return await this.fetchRawInner(url, mode, false, signal);
     } finally {
@@ -420,7 +595,7 @@ class BrowshManager {
       // Re-check the counter: an earlier queued callback may have recycled and
       // reset it already, so a new process must not be immediately killed.
       if (this.requestCount < this.recycleThreshold) return;
-      if (this.busy || this.waiting.length > 0) {
+      if (this.queue.isBusy || this.queue.pending > 0) {
         this.scheduleRecycle();
         return;
       }

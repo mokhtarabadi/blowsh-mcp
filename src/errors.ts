@@ -1,3 +1,4 @@
+// Sibling Docs: src/README.md | Decisions: src/DECISIONS.md
 /** Fetch error with optional HTTP status code, thrown instead of returned as strings. */
 export class FetchError extends Error {
   readonly statusCode?: number;

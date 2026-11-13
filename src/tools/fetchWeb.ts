@@ -90,6 +90,13 @@ export interface RenderResult {
 /** Stable machine-readable code for a render that produced no usable text. */
 export const EMPTY_EXTRACTION_CODE = "empty.extraction";
 
+/**
+ * Ceiling for an explicit `deadline_ms` (ms). Mirrors the zod schema cap in
+ * `server.ts`, so a value the schema accepts is never silently clamped lower
+ * here — that drift is what made a 700 s fetch budget collapse to 600 s.
+ */
+export const MAX_DEADLINE_MS = 1_800_000;
+
 /** Context carried into the empty-extraction guard. */
 export interface EmptyExtractionContext {
   url: string;
@@ -739,7 +746,9 @@ async function fetchWebNoGuard(opts: FetchWebOptions): Promise<string> {
   // NOTE: a deadline.hit message contains "timed out", not "timeout", so
   // isHardFailure() stays false and archive=auto never rescues it (documented).
   if (opts.deadline_ms && opts.deadline_ms > 0) {
-    const ms = Math.max(500, Math.min(600_000, opts.deadline_ms));
+    // Clamped to the same ceiling as the `deadline_ms` schema, so the cap here
+    // can never silently reject a value the schema accepted.
+    const ms = Math.max(500, Math.min(MAX_DEADLINE_MS, opts.deadline_ms));
     const deadlineError = createDeadlineError(`deadline.hit: fetch timed out after ${ms}ms for ${opts.url}`, opts.url);
     return Promise.race([
       fetchWebInner(opts),

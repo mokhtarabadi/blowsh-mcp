@@ -1,3 +1,4 @@
+// Sibling Docs: src/README.md | Decisions: src/DECISIONS.md
 import dotenv from "dotenv";
 import { z } from "zod";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -47,7 +48,7 @@ const tools = [
         must_contain: { type: "string", description: "Probe mode: verify the page mentions a string/pattern WITHOUT loading full content into context. Returns MATCH/NO-MATCH + up to 3 excerpts. Case-insensitive substring, or /regex/ (e.g. \"/CVE-2026-\\d+/\"). Full fetch still happens internally; only output collapses." },
         archive: { type: "string", enum: ["auto", "only", "off"], description: "Wayback resurrection: auto (default when set): on hard failure (404/paywall/timeout/network) serve nearest archived snapshot labeled with date; when no snapshot exists the original error is rethrown unchanged; only: skip live fetch, go straight to archive; off: never." },
         stitch: { type: "boolean", description: "Multi-page articles: follow rel=next and return WHOLE article in one call (up to 6 parts / 48k chars) with *(part N)* markers, same-host only." },
-        deadline_ms: { type: "number", description: "Hard time budget in ms (500-600000). On expiry: honest deadline.hit error, never a silent hang." },
+        deadline_ms: { type: "number", description: "Hard time budget in ms (500-1800000). Defaults to SEARCH_DEADLINE_MS (900000) when omitted, so a search always ends in results or an honest deadline.hit error. On expiry: in-flight renders are aborted and the budget is never silently exceeded." },
         tier: { type: "string", enum: ["auto", "1", "2"], description: "auto (default): HTTP first, auto-escalates to browser. \"1\": HTTP only (no browser). \"2\": browser directly (slower, skips HTTP)." },
         links: { type: "boolean", description: "Include [text](url) link URLs. Default true (blowsh). Set false to save ~30% tokens (matches DonSeTch default false)." },
         media: { type: "boolean", description: "Include image alt text and sources. Default true. Set false to strip media." },
@@ -64,7 +65,8 @@ const tools = [
       "Search the web through rendered search engines and return ranked results (title, url, snippet). " +
       "Engines: DuckDuckGo HTML, Bing, Brave, Mojeek (concurrently) fused by cross-engine consensus. " +
       "Use to discover pages, then feed URLs to fetch_web/extract_links. " +
-      "DonSeTch-parity: `query_variants` (up to 2 alternate formulations, searched in parallel), `intent` (auto/web/code/paper/news/entity selects verticals: GitHub, Wikipedia, arXiv, HN), `deadline_ms` (hard budget: on expiry with zero data returns cheap-fallback partials or an honest deadline.hit error, never a bare empty result).",
+      "DonSeTch-parity: `query_variants` (up to 2 alternate formulations, searched in parallel), `intent` (auto/web/code/paper/news/entity selects verticals: GitHub, Wikipedia, arXiv, HN), `deadline_ms` (hard budget: on expiry with zero data returns cheap-fallback partials or an honest deadline.hit error, never a bare empty result). " +
+      "When `deadline_ms` is omitted the search runs under `SEARCH_DEADLINE_MS` (default 900000 ms) and aborts its in-flight renders on expiry, so it never hangs past the budget. Engines that recently answered with a bot-block page are remembered and skipped for a short window, which keeps parallel variant searches from paying for dead tiers.",
     inputSchema: {
       type: "object",
       properties: {
@@ -74,7 +76,7 @@ const tools = [
         enrich: { type: "boolean", description: "When true, top-3 snippets are replaced with fetched markdown (best-effort)" },
         query_variants: { type: "array", items: { type: "string" }, description: "Optional alternate formulations of the same information need (max 2). Searched in parallel; results merged with dedup." },
         intent: { type: "string", enum: ["auto", "web", "code", "paper", "news", "entity"], description: "auto (default) detects from query. code: adds GitHub vertical; paper: arXiv; news: HN; entity: Wikipedia; web: general only." },
-        deadline_ms: { type: "number", description: "Hard time budget in ms (500-600000). On expiry: honest deadline error, never a silent hang." },
+        deadline_ms: { type: "number", description: "Hard time budget in ms (500-1800000). Defaults to SEARCH_DEADLINE_MS (900000) when omitted, so a search always ends in results or an honest deadline error, never a silent hang." },
       },
       required: ["query"],
     },
@@ -160,7 +162,7 @@ const selectors = {
     must_contain: z.string().optional(),
     archive: z.enum(["auto", "only", "off"]).optional(),
     stitch: z.boolean().optional(),
-    deadline_ms: z.number().int().min(500).max(600_000).optional(),
+    deadline_ms: z.number().int().min(500).max(1_800_000).optional(),
     tier: z.enum(["auto", "1", "2"]).optional(),
     links: z.boolean().optional(),
     media: z.boolean().optional(),
@@ -174,7 +176,7 @@ const selectors = {
     enrich: z.boolean().optional(),
     query_variants: z.array(z.string()).max(2).optional(),
     intent: z.enum(["auto", "web", "code", "paper", "news", "entity"]).optional(),
-    deadline_ms: z.number().int().min(500).max(600_000).optional(),
+    deadline_ms: z.number().int().min(500).max(1_800_000).optional(),
   }),
   extract_links: z.object({
     url: z.string(),
@@ -186,7 +188,7 @@ const selectors = {
     selector: z.string().optional(),
     max_chars: z.number().int().min(100).max(2_000_000).optional(),
     wait_ms: z.number().int().min(0).max(60_000).optional(),
-    deadline_ms: z.number().int().min(500).max(600_000).optional(),
+    deadline_ms: z.number().int().min(500).max(1_800_000).optional(),
   }),
   crawl_web: z.object({
     url: z.string(),

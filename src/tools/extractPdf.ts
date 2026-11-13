@@ -1,3 +1,4 @@
+// Sibling Docs: src/tools/README.md | Decisions: src/tools/DECISIONS.md
 import axios from "axios";
 import { spawn } from "node:child_process";
 import { PassThrough } from "node:stream";

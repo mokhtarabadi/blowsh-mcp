@@ -15,3 +15,5 @@ All runtime code for the blowsh-mcp MCP server (TypeScript 7 strict, NodeNext ES
 | `tools/` | Per-tool handlers, one file per MCP tool (see `tools/README.md`) |
 
 Rules: every outbound URL passes `assertSafeUrl`; every failure throws `FetchError`; strict tsc is the gatekeeper.
+
+Sibling docs: this file plus `DECISIONS.md` (dated ADRs for the server-side modules). Tool-level records live in `tools/README.md` and `tools/DECISIONS.md`. Every `.ts` file in this tree carries a one-line `// Sibling Docs:` pointer at the top.
