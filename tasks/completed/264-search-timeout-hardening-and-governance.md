@@ -1,9 +1,9 @@
 # Task 264: search-timeout-hardening-and-governance
 
-**File:** `tasks/qa/264-search-timeout-hardening-and-governance.md`
+**File:** `tasks/completed/264-search-timeout-hardening-and-governance.md`
 **Source:** manager
 **Type:** feature
-**Status:** open
+**Status:** closed
 **Finished:** 2026-11-13T18:39:58Z
 **Submitted:** 2026-11-13T18:36:32Z
 **Supersedes:** [262, 263]
