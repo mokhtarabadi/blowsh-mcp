@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-11-15
+
 ### Changed
 
 - Bundled the two in-flight tasks into one META (search timeout hardening + governance audit) so they close as a single unit with one diff and one all-or-nothing QA gate. The two source task files are archived to `tasks/archive/` with `**Status:** superseded` and a `**Superseded-By:**` marker, and stay reachable through `git log --follow`.
