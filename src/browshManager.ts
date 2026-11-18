@@ -6,6 +6,7 @@ import { pageCache } from "./cache.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ensureFirefoxProxyPrefs, resolveProxyConfig } from "./proxyConfig.js";
 
 /**
  * Strips terminal-style layout whitespace from Browsh plain text output.
@@ -415,6 +416,10 @@ class BrowshManager {
           ? `[browshManager] reusing profile (${entries} entries): ${this.profileDir}`
           : `[browshManager] fresh profile dir: ${this.profileDir}`
       );
+      // Firefox ignores HTTP_PROXY from the environment, so its proxy prefs
+      // must live in the redirected profile. Rewrite on every boot so a stale
+      // user.js on the /data/browsh-profile volume cannot keep a proxy active.
+      ensureFirefoxProxyPrefs(this.profileDir, resolveProxyConfig(process.env));
       await this.spawnAndWait();
     } catch (e) {
       // Any boot-path failure (mkdir blocked by a file, spawn timeout from a
@@ -425,6 +430,9 @@ class BrowshManager {
       if (backup === null) {
         throw e;
       }
+      // The quarantine above renamed the old profile away; seed the fresh
+      // directory before the retry so the recycled browser gets the same prefs.
+      ensureFirefoxProxyPrefs(this.profileDir, resolveProxyConfig(process.env));
       await this.spawnAndWait();
       if (e instanceof Error) {
         console.error(`[browshManager] start failed on first attempt: ${e.message}`);

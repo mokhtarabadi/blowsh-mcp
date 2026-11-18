@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Env-driven upstream proxy support for Docker deployments. Six new knobs in `.env.example` and `README.md` (`PROXY_TYPE`, `PROXY_HOST`, `PROXY_PORT`, `PROXY_USERNAME`, `PROXY_PASSWORD`, `PROXY_BYPASS`) drive both egress paths without an image rebuild. `src/proxyConfig.ts` seeds `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` for the existing axios calls and writes `network.proxy.*` preferences into `<BROWSH_PROFILE_DIR>/.config/browsh/firefox_profile/user.js` before every Browsh spawn, because Firefox ignores proxy environment variables. Direct mode writes only `network.proxy.type=0` to defeat stale volume state, and `localhost`/`127.0.0.1` are always bypassed so the `127.0.0.1:4333` control channel stays direct. README documents host-proxy reachability (`host.docker.internal`, `--add-host=host-gateway`, `--network host`) and two worked recipes. Regression coverage in `tests/proxy-config-tests.ts` (17 checks, no browser or network). SSRF guard, render queue, and timeout ladder unchanged. See `tasks/qa/268-env-driven-proxy-configuration.md`.
+
 ### Fixed
 
 - `search_web` / `fetch_web` calls timed out under parallel load because one crashed Browsh child stalled the single render slot. Diagnosis from the live singleton: 9 Go interfacer panics (`nil pointer dereference` in `startHeadlessFirefox()` / `quitFirefox()`) and 35 browser respawns in 2 days, 58 `caller aborted while queued` events, a queue that reached 20 waiters, and 312% CPU. `BrowshManager` now observes the child's `exit`/`error` events directly, so an unexpected exit clears process state immediately (Node's `ChildProcess.killed` stays false when a child dies on its own) and re-arms the boot prewarm; intentional recycle/idle/shutdown teardown is excluded because it nulls the process reference before killing. A pure `CrashCircuit` (3 unexpected exits in 60 s -> 30 s cooldown) rejects new renders before they queue, and the suspect Firefox profile is quarantined to `<dir>.corrupt-<ts>` after a storm. `isRunning` also checks `exitCode`/`signalCode`. New env knobs: `BROWSH_CRASH_WINDOW_MS`, `BROWSH_CRASH_THRESHOLD`, `BROWSH_CRASH_COOLDOWN_MS`.

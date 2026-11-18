@@ -99,3 +99,15 @@ Sibling of `src/README.md`. Tool-level records live in `src/tools/DECISIONS.md`.
 **Consequences.** Spaced crashes never trigger a profile move. A real storm triggers exactly one move. Recovery remains automatic when the cooldown elapses.
 
 **Rollback.** Restore the `totalCrashes >= DEFAULT_CRASH_THRESHOLD` check in `ensureStarted` and remove the `stormPending` assignment in the exit listener.
+
+## 2026-11-18 — Env-driven proxy for browser and axios egress
+
+**Context.** Operators running the MCP server in Docker had no way to use an upstream proxy. Firefox ignores `HTTP_PROXY` from the environment (Playwright #6094), Browsh v1.8.0 has no proxy flag, and its Viper loader has no `AutomaticEnv`, so `firefox.preferences` cannot be set from an environment variable. The Browsh profile lives on a persistent `/data/browsh-profile` volume (`Dockerfile:61`), so a config baked into the image can be shadowed by stale state. axios already honors proxy environment variables through `proxy-from-env`, but that library proxies `127.0.0.1` when `NO_PROXY` is unset, which would break the `127.0.0.1:4333` control channel.
+
+**Decision.** Introduce six `PROXY_*` variables (`PROXY_TYPE`, `PROXY_HOST`, `PROXY_PORT`, `PROXY_USERNAME`, `PROXY_PASSWORD`, `PROXY_BYPASS`) resolved once in `src/server.ts` and again before each Browsh spawn. `applyProxyEnv` seeds axios environment variables without changing any of the ~17 axios callsites, preserves explicit operator values, and always merges `localhost,127.0.0.1` into `NO_PROXY`. `ensureFirefoxProxyPrefs` writes `<profileDir>/.config/browsh/firefox_profile/user.js` on every boot with `network.proxy.*` preferences for `http` or `socks5`; when no proxy is configured it writes only `network.proxy.type=0`. Credentials are URL-encoded for axios and JSON-escaped for Firefox and are never logged. The SSRF guard, render queue, and timeout ladder are untouched.
+
+**Alternatives rejected.** (a) Relying only on `HTTP_PROXY` — Firefox does not consume it, so browser renders would stay direct. (b) Baking a Browsh `config.toml` into the image — the `/data/browsh-profile` volume can shadow it and Browsh has no env binding for `firefox.preferences`. (c) Adding a proxy agent at every axios callsite — 17 edits with no benefit over environment seeding. (d) Running a transparent container-level proxy — outside this repository's control and invisible to the operator's `.env`.
+
+**Consequences.** One `.env` contract covers both egress paths without an image rebuild. Direct mode is deterministic across profile reuse. SOCKS5 selects `socks5h` for axios so DNS resolves remotely; operators whose Node-side HTTP client cannot handle a SOCKS URL should use `PROXY_TYPE=http` for axios while keeping a SOCKS proxy in front of Firefox. Firefox builds that prompt for proxy credentials in headless mode need an IP-allowlisted proxy for browser renders.
+
+**Rollback.** Remove the six variables and `src/proxyConfig.ts`, revert the two call sites, and delete the generated `user.js`. `prefs.js` on an existing profile may retain proxy values until the profile volume is reset.

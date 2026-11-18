@@ -293,6 +293,73 @@ Set these via `.env` (loaded automatically) or the environment:
 | `MCP_HOST`                  | `127.0.0.1`   | Bind address for HTTP/SSE mode. Use `0.0.0.0` inside Docker (lock the host side with `-p 127.0.0.1:<port>:<port>`). |
 | `MCP_PORT`                  | `8107`        | Port for HTTP/SSE mode (`8108` default under `MCP_TRANSPORT=sse`).        |
 | `NODE_ENV`                  | `production`  | Node environment.                                                        |
+| `PROXY_TYPE`                | `none`        | `none`, `http`, or `socks5`. Invalid values abort startup.                 |
+| `PROXY_HOST`                | _(empty)_     | Proxy hostname/IP without scheme, path, port, or credentials. Required for `http`/`socks5`. |
+| `PROXY_PORT`                | _(empty)_     | Proxy port, integer 1–65535. Required for `http`/`socks5`.                 |
+| `PROXY_USERNAME`            | _(empty)_     | Optional proxy username. Required when `PROXY_PASSWORD` is set.           |
+| `PROXY_PASSWORD`            | _(empty)_     | Optional proxy password. Never logged; URL-encoded for axios, escaped for Firefox. |
+| `PROXY_BYPASS`              | `localhost,127.0.0.1` | Comma-separated bypass list. Loopbacks are always added to protect the `127.0.0.1:4333` control channel. |
+
+### Proxy support (Docker)
+
+Both egress paths use the same six variables. Node-side calls (`axios`) pick up
+the seeded `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` values automatically.
+Firefox ignores those environment variables, so the server writes
+`network.proxy.*` preferences to
+`<BROWSH_PROFILE_DIR>/.config/browsh/firefox_profile/user.js` before every
+Browsh spawn. With the default profile root that is
+`/data/browsh-profile/.config/browsh/firefox_profile/user.js`. The file is
+rewritten on every boot; when `PROXY_TYPE=none` it contains only
+`network.proxy.type=0`, so a stale proxy on a reused volume cannot survive.
+
+Prerequisites:
+
+- The proxy address must be reachable **from inside the container**. A proxy
+  listening on the host is not reachable as `localhost`: inside the container
+  `localhost` is the container itself.
+- Docker Desktop: use `host.docker.internal` as `PROXY_HOST`.
+- Docker Engine on Linux: add `--add-host=host.docker.internal:host-gateway`
+  to `docker run`, then use `host.docker.internal` as `PROXY_HOST`.
+- Linux alternative: use `--network host` and `PROXY_HOST=127.0.0.1`. Note this
+  removes network isolation; the bridge recipes above are preferred.
+- If the proxy requires authentication, set both `PROXY_USERNAME` and
+  `PROXY_PASSWORD`. Some Firefox builds still prompt for proxy credentials in
+  headless mode; an IP-allowlisted proxy avoids that for browser renders.
+- `localhost` and `127.0.0.1` are always bypassed. Do not remove them from
+  `PROXY_BYPASS`: the Browsh control channel and Marionette depend on loopback.
+- The SSRF guard is unchanged. A proxy does not let `fetch_web` reach private
+  addresses; `ALLOW_PRIVATE_URLS` remains the only guard kill-switch.
+
+Bridge mode with a proxy on the Docker host (Linux):
+
+```sh
+docker run --rm -i \
+  --add-host=host.docker.internal:host-gateway \
+  -e PROXY_TYPE=http \
+  -e PROXY_HOST=host.docker.internal \
+  -e PROXY_PORT=8080 \
+  -e PROXY_USERNAME=my-user \
+  -e PROXY_PASSWORD=my-password \
+  -e PROXY_BYPASS=localhost,127.0.0.1,internal.example.com \
+  blowsh-mcp:latest
+```
+
+Host networking with a local SOCKS5 proxy (Linux):
+
+```sh
+docker run --rm -i --network host \
+  -e PROXY_TYPE=socks5 \
+  -e PROXY_HOST=127.0.0.1 \
+  -e PROXY_PORT=1080 \
+  blowsh-mcp:latest
+```
+
+Or put the same keys in `.env` and use `--env-file .env` instead of repeated
+`-e` flags. To switch an existing profile back to direct, set `PROXY_TYPE=none`
+and restart; the server overwrites `user.js` automatically. If Firefox still
+uses the old proxy, reset the profile volume (for example
+`docker volume rm blowsh-profile`) because `prefs.js` can retain values from an
+earlier session.
 
 ---
 

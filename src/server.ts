@@ -8,6 +8,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express, { type Request, type Response } from "express";
 import { browshManager } from "./browshManager.js";
 import { toFetchErrorMessage } from "./errors.js";
+import { applyProxyEnv, resolveProxyConfig } from "./proxyConfig.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -20,6 +21,13 @@ import { fetchWebBatch } from "./tools/fetchWebBatch.js";
 import { crawlWeb } from "./tools/crawlWeb.js";
 
 dotenv.config({ quiet: true });
+
+// Resolve the Docker proxy contract before any tool or transport can send a
+// request. Validation failures abort startup; no pref value or credential is
+// ever logged here. The loopback bypass is always merged into NO_PROXY so the
+// Browsh control channel stays direct.
+const proxyConfig = resolveProxyConfig(process.env);
+applyProxyEnv(proxyConfig);
 
 const tools = [
   ToolSchema.parse({
