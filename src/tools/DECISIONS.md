@@ -54,3 +54,25 @@ The invariant is asserted in `tests/search-timeout-hardening-tests.ts` (the `tim
 **Consequences.** A slow host can now complete a full tier chain inside one budget. Worst-case latency for a single search rose from 180 s to 900 s, which is the point: the previous ceiling was too low to ever succeed on a cold or busy host. `BROWSH_STARTUP_TIMEOUT_MS` rose to 120 s so a slow cold start no longer fails the first fetch. The `deadline_ms` ceiling rose to 1800000 ms in the schema, the runtime clamp, and the docs together, so a schema-valid value can never be silently clamped lower again.
 
 **Rollback.** Every value is an env knob with the previous number as a one-line edit; the ladder assertion reads the exported constants (`DEFAULT_RENDER_TIMEOUT_MS`, `DEFAULT_QUEUE_TIMEOUT_MS`, `DEFAULT_STARTUP_TIMEOUT_MS`, `ENRICH_BUDGET_MS`, `resolveSearchDeadline`), so restoring the old numbers restores the old behaviour and the old assertion results.
+
+## 2026-11-17 — Variants are sequential and enrichment sheds under load
+
+**Context.** A live singleton with two parallel `query_variants` searches and enrichment could put ~27 renders into one serialized browser slot. Logs showed the queue reaching 20 waiters and 58 callers aborting before their deadline. The engine tiers inside one query were already bounded; the unbounded part was the multiplication across variants and the optional enrichment fetches layered on top.
+
+**Decision.** Run `query_variants` in a `for` loop, awaiting each `searchSingleQuery` before starting the next, then merge with the same `mergeResults`/dedup logic. Add `browserQueueLoaded()` over `browshManager.queuePressure` and skip enrichment when the slot is busy or has pending waiters. Engine tiers, consensus ranking, blocked-engine breaker, and all four timeout defaults stay unchanged.
+
+**Alternatives rejected.** (a) Lowering the timeout ladder — rejected in the server-side ADR of the same date; it fights a recorded decision and does not reduce render count. (b) Aborting the consensus pool on first success — rejected earlier as a contract violation; still rejected. (c) Dropping variants entirely — rejected, it loses recall the feature exists to provide.
+
+**Consequences.** Multi-variant calls take longer in the best case because their queries no longer overlap, but they no longer collapse the shared queue under load. Enrichment is best-effort by contract, so shedding it under pressure does not change the organic result set. Coverage: `tests/browser-crash-circuit-tests.ts` verifies the pressure helper and the pure circuit; the existing timeout-ladder suite still passes unchanged.
+
+**Rollback.** Replace the `for` loop with the previous `Promise.all(queries.map(...))` and remove the two `&& !browserQueueLoaded()` guards. No env default or schema changes are involved.
+
+## 2026-11-17 — A fired budget throws, it never breaks into a partial answer
+
+**Context.** QA rejected the sequential variant loop's `if (budgetController.signal.aborted) break;`. If the global budget expired after one variant finished but before the next started, the loop merged the partial set and returned it as a complete answer. With no variant finished it returned a bare empty success. Both hide deadline expiry and skip the cheap fallback.
+
+**Decision.** Replace `break` with `throw createDeadlineError(...)` carrying the remaining budget and the current query text. The existing per-query `catch` still rethrows `isDeadlineHitError` and maps other errors to an empty per-query array, so only a genuine global abort short-circuits. `isQueueLoaded(pressure)` is exported as a pure helper so the pressure contract is testable without a browser.
+
+**Consequences.** Deadline expiry always surfaces as `deadline.hit`; the outer race runs `fetchCheapFallback` as designed. Merge order and dedup are unchanged.
+
+**Rollback.** Restore `if (budgetController.signal.aborted) break;` and inline the pressure check. No env or schema changes.

@@ -73,3 +73,29 @@ Sibling of `src/README.md`. Tool-level records live in `src/tools/DECISIONS.md`.
 **Consequences.** No persistence, no cross-process sharing, and a restart clears the cache. That is the intended trade for a single-container MCP server.
 
 **Rollback.** Set `CACHE_TTL_MS` low, or bypass the cache at a call site; the cache is the only consumer of `TtlCache` for pages.
+
+## 2026-11-17 — A crash storm is contained by a circuit, not by longer budgets
+
+**Context.** The singleton exhausted caller deadlines under parallel load. Logs showed 9 Browsh Go interfacer panics and 35 respawns in 2 days, with 58 aborted queue waits and sustained 312% CPU. `isRunning` relied on `ChildProcess.killed`, which stays false when a child exits by itself, so a crashed browser still looked alive until a request hit `ECONNREFUSED`. Recovery then paid up to `BROWSH_STARTUP_TIMEOUT_MS` (120 s) per crash while every queued caller waited.
+
+**Decision.** Three separate changes, none of which touch the four-budget ladder:
+
+1. Observe the child's `exit` and `error` events. An unexpected exit clears `this.process`, resets the boot prewarm, and records a crash. `clearProcess()` nulls `this.process` before any intentional kill, so recycle, idle-kill, and shutdown are structurally excluded from the crash count. `isRunning` also checks `exitCode`/`signalCode` for the race before the event fires.
+2. Add the exported, timer-free `CrashCircuit`: three unexpected exits in 60 s open a 30 s window in which `ensureStarted` and `fetchRaw` fail fast before queueing. The burst history clears on open, so recovery is automatic when the cooldown elapses. Thresholds are env-tunable (`BROWSH_CRASH_WINDOW_MS`, `BROWSH_CRASH_THRESHOLD`, `BROWSH_CRASH_COOLDOWN_MS`).
+3. After a storm, quarantine the persisted Firefox profile via the existing allowlisted `quarantineProfileDir` before the next spawn, so a corrupted profile is not retried indefinitely. The backup is renamed, never deleted.
+
+**Alternatives rejected.** (a) Lowering `SEARCH_DEADLINE_MS` / `BROWSH_REQUEST_TIMEOUT_MS` / `BROWSH_QUEUE_TIMEOUT_MS` — rejected, it contradicts the 2026-11-13 ladder ADR, reintroduces false timeouts on slow hosts, and does not stop the respawn storm. (b) Patching Browsh's Go segfault — the binary is external to this repo. (c) Restarting the container only — it clears the symptom but leaves the crash loop able to recur.
+
+**Consequences.** A healthy host keeps the full 900 s chain budget. A crashing browser now fails honestly within the cooldown instead of consuming the queue budget. The profile directory accumulates `.corrupt-<ts>` backups after storms, which are recoverable but should be cleaned by an operator.
+
+**Rollback.** Remove the `exit`/`error` listeners and the two circuit guards, restore the old `isRunning` body, and keep the profile quarantine call dormant. The env knobs are additive; removing their use restores prior behaviour with no default change.
+
+## 2026-11-17 — Quarantine arms on a windowed storm, not a lifetime count
+
+**Context.** QA rejected the first pass: `ensureStarted` compared the lifetime `totalCrashes` counter against `DEFAULT_CRASH_THRESHOLD`. Three crashes spaced across weeks would still move the profile, and the configured `BROWSH_CRASH_THRESHOLD` knob was ignored for the quarantine decision.
+
+**Decision.** Add `stormPending`, set only when `CrashCircuit.record` opens the circuit (i.e. the configured number of crashes lands inside the configured window). `ensureStarted` quarantines on `stormPending`, then clears it and the lifetime counter. `totalCrashes` stays as an observability log field only. `CrashCircuit.reset` is documented as a test seam; the production start path never calls it while the circuit is open, because that would defeat the cooldown. The circuit guard still runs after the quarantine block, so new renders fail fast during cooldown.
+
+**Consequences.** Spaced crashes never trigger a profile move. A real storm triggers exactly one move. Recovery remains automatic when the cooldown elapses.
+
+**Rollback.** Restore the `totalCrashes >= DEFAULT_CRASH_THRESHOLD` check in `ensureStarted` and remove the `stormPending` assignment in the exit listener.

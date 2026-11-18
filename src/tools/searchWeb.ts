@@ -8,6 +8,21 @@ import { TtlCache } from "../cache.js";
 import { fetchWeb } from "./fetchWeb.js";
 
 /**
+ * True when another caller already holds or waits for the single render slot.
+ * Best-effort phases (currently enrichment) shed themselves when the queue is
+ * loaded, so a search cannot inflate the very backlog that times it out. This
+ * is a load-shedding signal, never a correctness gate: the organic result set
+ * is returned intact without enrichment.
+ */
+export function isQueueLoaded(pressure: { busy: boolean; pending: number }): boolean {
+  return pressure.busy || pressure.pending > 0;
+}
+
+export function browserQueueLoaded(): boolean {
+  return isQueueLoaded(browshManager.queuePressure);
+}
+
+/**
  * Pure precedence rule for an empty merged result under a deadline.
  * Exported for tests. Returns true only when the global deadline fired
  * (signal aborted) AND nothing usable was collected — this is a
@@ -950,7 +965,7 @@ async function searchSingleQuery(
     // markdown. Best-effort, sequential, and hard-bounded by a wall-clock budget.
     // The phase is clamped to the remaining search budget and each fetch
     // inherits it, so enrichment can never outlive the search it belongs to.
-    if (enrich && merged.length > 0) {
+    if (enrich && merged.length > 0 && !browserQueueLoaded()) {
       const budgetEnd = startedAt + deadlineMs;
       const enrichEnd = Math.min(budgetEnd, Date.now() + ENRICH_BUDGET_MS);
       for (const result of merged.slice(0, 3)) {
@@ -1043,24 +1058,42 @@ export async function searchWeb(
       return searchSingleQuery(query, max, currentPage, enrich, resolvedIntent, budgetMs, budgetController.signal);
     }
 
-    // Variants: search each query in parallel, then merge per-query result sets with dedup across variants
-    // For separated sets, we merge but preserve variant provenance in snippet? We merge flat for backward compat.
+    // Variants run SEQUENTIALLY, not in parallel. Every render goes through one
+    // serialized browser slot, so three parallel variants could queue up to 18
+    // renders before any of them finished — the peak backlog that made a
+    // multi-variant search miss its deadline. Running one query at a time still
+    // merges all variants with dedup, but peak queue pressure scales with one
+    // query instead of three. The engine tiers inside a single query remain
+    // unchanged, so consensus ranking is preserved.
+    //
     // D3: a per-query deadline.hit must propagate (outer race runs the cheap
     // fallback); swallowing it into [] would re-introduce the bare-[] bug.
-    const perQueryResults = await Promise.all(
-      queries.map((q) =>
-        searchSingleQuery(q, max, currentPage, false, resolvedIntent, budgetMs, budgetController.signal).catch((e: unknown) => {
-          if (isDeadlineHitError(e)) throw e;
-          return [] as SearchResult[];
-        })
-      )
-    );
+    const perQueryResults: SearchResult[][] = [];
+    for (const q of queries) {
+      // A fired global budget must end in deadline.hit, never a bare empty (or
+      // silently partial) success. `break` here would merge whatever finished
+      // so far and return it as a complete answer, hiding the expiry and
+      // skipping the cheap fallback the outer race exists to provide.
+      if (budgetController.signal.aborted) {
+        throw createDeadlineError(
+          `deadline.hit: search timed out after ${budgetMs}ms (query: ${q})`
+        );
+      }
+      try {
+        perQueryResults.push(
+          await searchSingleQuery(q, max, currentPage, false, resolvedIntent, budgetMs, budgetController.signal)
+        );
+      } catch (e: unknown) {
+        if (isDeadlineHitError(e)) throw e;
+        perQueryResults.push([] as SearchResult[]);
+      }
+    }
 
     // Merge across variants: dedup by URL, keep highest consensus
     const flatMerged = mergeResults(perQueryResults);
 
     // Enrich after merge if requested (once), clamped to the search budget.
-    if (enrich && flatMerged.length > 0) {
+    if (enrich && flatMerged.length > 0 && !browserQueueLoaded()) {
       const budgetEnd = startedAt + budgetMs;
       const enrichEnd = Math.min(budgetEnd, Date.now() + ENRICH_BUDGET_MS);
       for (const result of flatMerged.slice(0, 3)) {

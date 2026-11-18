@@ -97,6 +97,76 @@ export function resolveRenderTimeouts(env: NodeJS.ProcessEnv = process.env): {
 }
 
 /**
+ * Defaults for the browser crash circuit-breaker.
+ *
+ * A Browsh 1.8.0 child can die from a Go interfacer panic when Firefox starts
+ * or quits during a race. Without a breaker each crash triggers an immediate
+ * respawn, and a crash storm burns CPU while every queued render waits for a
+ * browser that keeps dying. Three crashes in a minute is not a transient
+ * hiccup; it is a storm, and the circuit stops paying for it.
+ */
+export const DEFAULT_CRASH_WINDOW_MS = 60_000;
+export const DEFAULT_CRASH_THRESHOLD = 3;
+export const DEFAULT_CRASH_COOLDOWN_MS = 30_000;
+
+/**
+ * Pure, timer-free crash circuit. Exported so the storm policy is provable
+ * without a browser or a wall clock. `now` is always supplied by the caller.
+ *
+ * Once `threshold` crashes land inside `windowMs`, the circuit opens for
+ * `cooldownMs` and the burst history clears. When the cooldown elapses the
+ * circuit closes with an empty history, so recovery is automatic and bounded.
+ */
+export class CrashCircuit {
+  private crashes: number[] = [];
+  private openUntil = 0;
+
+  constructor(
+    private readonly windowMs: number = DEFAULT_CRASH_WINDOW_MS,
+    private readonly threshold: number = DEFAULT_CRASH_THRESHOLD,
+    private readonly cooldownMs: number = DEFAULT_CRASH_COOLDOWN_MS
+  ) {}
+
+  /** Record a crash at `now`. Returns true when this crash opened the circuit. */
+  record(now: number): boolean {
+    this.crashes = this.crashes.filter((t) => now - t < this.windowMs);
+    this.crashes.push(now);
+    if (this.crashes.length >= this.threshold) {
+      this.openUntil = now + this.cooldownMs;
+      this.crashes = [];
+      return true;
+    }
+    return false;
+  }
+
+  /** True while new work must be rejected to let the browser settle. */
+  isOpen(now: number): boolean {
+    return now < this.openUntil;
+  }
+
+  /** Milliseconds until the circuit closes (0 when already closed). */
+  remainingMs(now: number): number {
+    return Math.max(0, this.openUntil - now);
+  }
+
+  /** Crashes recorded in the current, still-open burst window. */
+  get crashCount(): number {
+    return this.crashes.length;
+  }
+
+  /**
+   * Forget all history. TEST-SEAM ONLY: the production start path deliberately
+   * does not call this while the circuit is open, because clearing `openUntil`
+   * would close the circuit early and defeat the cooldown. Recovery is by the
+   * cooldown elapsing, not by an explicit reset.
+   */
+  reset(): void {
+    this.crashes = [];
+    this.openUntil = 0;
+  }
+}
+
+/**
  * One render queued behind the browser mutex.
  *
  * `aborted` marks a waiter that gave up while it was still queued (the
@@ -252,6 +322,14 @@ class BrowshManager {
   private readonly queue: RenderQueue;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private lastCycleAt = 0;
+  /** Unexpected child exits only; intentional recycle/idle teardown never touches this. */
+  private readonly crashCircuit: CrashCircuit;
+  /** Lifetime count, kept for observability only. Never used for quarantine decisions. */
+  private totalCrashes = 0;
+  /** Set only when CrashCircuit opens on a true in-window storm; cleared after one quarantine. */
+  private stormPending = false;
+  /** The configured threshold, so the quarantine decision honours the env knob. */
+  private readonly crashThreshold: number;
 
   constructor(firefoxPath?: string) {
     // Get path from env or default to "firefox"
@@ -295,11 +373,40 @@ class BrowshManager {
     this.cols = clampIntEnv(process.env.BROWSH_COLS, 80, 250, 160, "BROWSH_COLS");
     this.rows = clampIntEnv(process.env.BROWSH_ROWS, 24, 100, 60, "BROWSH_ROWS");
     this.queue = new RenderQueue(this.queueTimeoutMs);
+    this.crashThreshold = clampIntEnv(process.env.BROWSH_CRASH_THRESHOLD, 2, 20, DEFAULT_CRASH_THRESHOLD, "BROWSH_CRASH_THRESHOLD");
+    this.crashCircuit = new CrashCircuit(
+      clampIntEnv(process.env.BROWSH_CRASH_WINDOW_MS, 5_000, 600_000, DEFAULT_CRASH_WINDOW_MS, "BROWSH_CRASH_WINDOW_MS"),
+      this.crashThreshold,
+      clampIntEnv(process.env.BROWSH_CRASH_COOLDOWN_MS, 1_000, 300_000, DEFAULT_CRASH_COOLDOWN_MS, "BROWSH_CRASH_COOLDOWN_MS")
+    );
   }
 
   /** Start Browsh if not running. */
   async ensureStarted(): Promise<void> {
     if (this.isRunning) return;
+    const now = Date.now();
+    // After a true in-window storm the persisted Firefox profile is the prime
+    // suspect. Move it aside before another spawn so the next browser gets a
+    // clean home. `stormPending` is armed only when CrashCircuit.record opens
+    // the circuit, so it honours the configured threshold and never fires for
+    // crashes spaced far apart. quarantineProfileDir is allowlisted to /data
+    // and TMP, so an operator typo in BROWSH_PROFILE_DIR cannot move host data.
+    if (this.stormPending) {
+      const backup = quarantineProfileDir(this.profileDir);
+      if (backup) {
+        console.error(`[browshManager] quarantined profile after crash storm: ${backup}`);
+        this.stormPending = false;
+        this.totalCrashes = 0;
+      }
+    }
+    // Fail fast while the breaker is open: respawning into a crash loop is
+    // what pinned the CPU at 312% and buried every caller in the render queue.
+    if (this.crashCircuit.isOpen(now)) {
+      throw new FetchError(
+        `Browsh circuit open after repeated crashes; retry in ${this.crashCircuit.remainingMs(now)}ms`,
+        { url: this.healthPath }
+      );
+    }
     try {
       fs.mkdirSync(this.profileDir, { recursive: true });
       const entries = fs.readdirSync(this.profileDir).length;
@@ -372,7 +479,7 @@ class BrowshManager {
       this.cols,
       this.rows
     );
-    this.process = spawn("browsh", args, {
+    const proc = spawn("browsh", args, {
       stdio: ["ignore", "inherit", "inherit"],
       // Own process group so we can tear down browsh AND its Firefox child
       // together — SIGTERM to browsh alone orphans Firefox, which then holds
@@ -385,6 +492,38 @@ class BrowshManager {
         LINES: String(this.rows),
       },
     });
+    this.process = proc;
+
+    // Node's ChildProcess.killed stays false when a child exits on its own, so
+    // isRunning used to keep reporting "running" after a Go panic killed Browsh.
+    // Observing the exit event directly flips state immediately, re-arms the
+    // boot prewarm, and feeds the crash circuit. clearProcess() sets
+    // `this.process = null` BEFORE any intentional kill, so a planned recycle,
+    // idle kill, or shutdown is never miscounted as a crash.
+    let childSettled = false;
+    const onUnexpectedExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (childSettled) return;
+      childSettled = true;
+      if (this.process !== proc) return;
+      this.process = null;
+      this.warmup = null;
+      this.lastCycleAt = Date.now();
+      this.totalCrashes++;
+      const opened = this.crashCircuit.record(Date.now());
+      // Only a true in-window storm arms quarantine. A lifetime totalCrashes
+      // check would move the profile after three crashes spaced over weeks,
+      // and would ignore the configured threshold.
+      if (opened) this.stormPending = true;
+      console.error(
+        `[browshManager] unexpected child exit (code=${code}, signal=${signal}), total=${this.totalCrashes}, burst=${this.crashCircuit.crashCount}${opened ? " — circuit OPEN" : ""}`
+      );
+    };
+    proc.once("exit", onUnexpectedExit);
+    proc.once("error", (err: Error) => {
+      console.error(`[browshManager] child spawn error: ${err.message}`);
+      onUnexpectedExit(-1, null);
+    });
+
     const ready = await this.waitForReady(this.startupTimeoutMs);
     if (!ready) {
       await this.shutdown();
@@ -433,6 +572,15 @@ class BrowshManager {
     mode: "PLAIN" | "DOM",
     signal?: AbortSignal
   ): Promise<string> {
+    // Reject before queueing while the breaker is open. A queued render would
+    // otherwise occupy the single slot only to discover the browser is down.
+    const now = Date.now();
+    if (this.crashCircuit.isOpen(now)) {
+      throw new FetchError(
+        `Browsh circuit open after repeated crashes; retry in ${this.crashCircuit.remainingMs(now)}ms`,
+        { url }
+      );
+    }
     const outcome = await this.acquire(signal);
     if (!outcome.granted) {
       // The wait ended without the mutex: the request was aborted, or it sat
@@ -660,7 +808,22 @@ class BrowshManager {
 
   /** Returns true if Browsh is running. */
   get isRunning() {
-    return this.process !== null && !this.process.killed;
+    const proc = this.process;
+    return (
+      proc !== null &&
+      !proc.killed &&
+      proc.exitCode === null &&
+      proc.signalCode === null
+    );
+  }
+
+  /**
+   * Current render-slot pressure, for callers that can shed optional work.
+   * Enrichment and other best-effort phases skip themselves when a caller is
+   * already waiting, so a search stops inflating the queue it is stuck behind.
+   */
+  get queuePressure(): { busy: boolean; pending: number } {
+    return { busy: this.queue.isBusy, pending: this.queue.pending };
   }
 }
 

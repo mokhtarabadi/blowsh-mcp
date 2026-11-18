@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `search_web` / `fetch_web` calls timed out under parallel load because one crashed Browsh child stalled the single render slot. Diagnosis from the live singleton: 9 Go interfacer panics (`nil pointer dereference` in `startHeadlessFirefox()` / `quitFirefox()`) and 35 browser respawns in 2 days, 58 `caller aborted while queued` events, a queue that reached 20 waiters, and 312% CPU. `BrowshManager` now observes the child's `exit`/`error` events directly, so an unexpected exit clears process state immediately (Node's `ChildProcess.killed` stays false when a child dies on its own) and re-arms the boot prewarm; intentional recycle/idle/shutdown teardown is excluded because it nulls the process reference before killing. A pure `CrashCircuit` (3 unexpected exits in 60 s -> 30 s cooldown) rejects new renders before they queue, and the suspect Firefox profile is quarantined to `<dir>.corrupt-<ts>` after a storm. `isRunning` also checks `exitCode`/`signalCode`. New env knobs: `BROWSH_CRASH_WINDOW_MS`, `BROWSH_CRASH_THRESHOLD`, `BROWSH_CRASH_COOLDOWN_MS`.
+- Multi-variant searches no longer inflate the render queue: `query_variants` now run sequentially instead of in parallel, so peak queued renders scale with one query rather than three (previously up to ~27 renders for a 2-variant search with enrichment). Engine tiers and consensus ranking inside a single query are unchanged. Enrichment now sheds itself when `browshManager.queuePressure` reports a busy or waiting slot, so a search stops growing the backlog it is stuck behind. The four-budget ladder is deliberately unchanged (ADR 2026-11-13); fail-fast comes from the crash circuit instead. Regression coverage in `tests/browser-crash-circuit-tests.ts` (19 checks, no browser, no network).
+
+- QA hotfix: the sequential `query_variants` loop now throws `createDeadlineError` when the global budget fires between queries instead of `break`-ing into a partial or bare empty success, so the outer cheap fallback still runs. Profile quarantine now arms only on a true in-window storm (`stormPending`, set by `CrashCircuit.record` opening the circuit) and uses the configured `BROWSH_CRASH_THRESHOLD`, instead of a lifetime `totalCrashes` counter compared to the default constant. `CrashCircuit.reset` is documented as a test seam only. `isQueueLoaded` is exported as a pure helper for no-browser pressure tests. The regression suite now has 29 checks (added spaced-crash, pressure, and deadline-classification cases).
+
 ## [2.7.0] - 2026-11-15
 
 ### Changed
