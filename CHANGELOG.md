@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-11-20
+
 ### Added
 
 - Env-driven upstream proxy support for Docker deployments. Six new knobs in `.env.example` and `README.md` (`PROXY_TYPE`, `PROXY_HOST`, `PROXY_PORT`, `PROXY_USERNAME`, `PROXY_PASSWORD`, `PROXY_BYPASS`) drive both egress paths without an image rebuild. `src/proxyConfig.ts` seeds `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` for the existing axios calls and writes `network.proxy.*` preferences into `<BROWSH_PROFILE_DIR>/.config/browsh/firefox_profile/user.js` before every Browsh spawn, because Firefox ignores proxy environment variables. Direct mode writes only `network.proxy.type=0` to defeat stale volume state, and `localhost`/`127.0.0.1` are always bypassed so the `127.0.0.1:4333` control channel stays direct. README documents host-proxy reachability (`host.docker.internal`, `--add-host=host-gateway`, `--network host`) and two worked recipes. Regression coverage in `tests/proxy-config-tests.ts` (17 checks, no browser or network). SSRF guard, render queue, and timeout ladder unchanged. See `tasks/qa/268-env-driven-proxy-configuration.md`.
