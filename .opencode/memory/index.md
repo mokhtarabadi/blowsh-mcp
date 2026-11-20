@@ -6,4 +6,3 @@
 | :--- | :--- | :--- | :--- |
 | architecture | living_folder_docs_required | # Living folder docs are mandatory in every component directory | governance, docs, living-folder |
 | blowsh-mcp | config-quirks | Env var quirks (v2.1): |  |
-| blowsh-mcp | v211-bugfix-quirks | v2.1.1 bug-fix quirks (2026-08-03): |  |
