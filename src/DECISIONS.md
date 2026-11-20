@@ -111,3 +111,15 @@ Sibling of `src/README.md`. Tool-level records live in `src/tools/DECISIONS.md`.
 **Consequences.** One `.env` contract covers both egress paths without an image rebuild. Direct mode is deterministic across profile reuse. SOCKS5 selects `socks5h` for axios so DNS resolves remotely; operators whose Node-side HTTP client cannot handle a SOCKS URL should use `PROXY_TYPE=http` for axios while keeping a SOCKS proxy in front of Firefox. Firefox builds that prompt for proxy credentials in headless mode need an IP-allowlisted proxy for browser renders.
 
 **Rollback.** Remove the six variables and `src/proxyConfig.ts`, revert the two call sites, and delete the generated `user.js`. `prefs.js` on an existing profile may retain proxy values until the profile volume is reset.
+
+## 2026-11-20 — The startup health probe gets its own budget
+
+**Context.** A deployment behind an upstream proxy reported `FetchError: Browsh did not start in HTTP mode within timeout` on every render. Direct live measurement showed Browsh's control endpoint answering HTTP 200 within 0.9-2 s, well inside the 120 s startup budget. The cause was `waitForReady`'s hardcoded 800 ms axios timeout: it is shorter than one render of Browsh's welcome page, so every probe failed before the endpoint could answer. Two related flaws made the symptom worse: the startup budget was raised from 120 s to 300 s with no effect, and `ensureStarted` quarantined the Firefox profile on any boot-path error, including this pure timeout, so a healthy profile could be discarded and a second full budget paid for nothing.
+
+**Decision.** Add `DEFAULT_HEALTH_PROBE_TIMEOUT_MS = 5000` and expose `BROWSH_HEALTH_PROBE_TIMEOUT_MS` (clamped 1000-60000) through `resolveRenderTimeouts`, alongside the existing render, queue, and startup budgets. `waitForReady` uses that value per probe; the outer `BROWSH_STARTUP_TIMEOUT_MS` loop still bounds total startup time. In `ensureStarted`, a `FetchError` whose message is the startup-timeout text is rethrown unchanged, without profile quarantine. Profile quarantine stays reserved for path and lock failures.
+
+**Alternatives rejected.** (a) Raising `BROWSH_STARTUP_TIMEOUT_MS` — already tried at 300 s; the per-probe timeout is independent, so it cannot help. (b) Removing the upstream proxy — the slow probe reproduces with proxying off, so the proxy is not the root cause. (c) Replacing `/` with a lightweight Browsh health route — Browsh 1.8.0 exposes no such route. (d) Removing the profile quarantine entirely — it is the correct response to a genuine corrupt-profile storm (2026-11-14 ADR).
+
+**Consequences.** A slow-but-healthy browser is now detected in one probe instead of failing after the whole startup budget. Worst-case failure detection inside startup rises from 800 ms to 5 s per probe, still bounded by the startup loop. Operators on unusually slow hosts can raise the knob without touching the render ladder.
+
+**Rollback.** Restore the literal `800` in `waitForReady`, remove the `probe` field and env knob, and delete the timeout guard in `ensureStarted`. No data migration.

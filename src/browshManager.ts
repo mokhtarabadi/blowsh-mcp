@@ -78,6 +78,39 @@ function cleanPlainText(text: string): string {
 export const DEFAULT_RENDER_TIMEOUT_MS = 180_000;
 export const DEFAULT_QUEUE_TIMEOUT_MS = 600_000;
 export const DEFAULT_STARTUP_TIMEOUT_MS = 120_000;
+/**
+ * Per-probe budget for the Browsh control-channel health check.
+ *
+ * Browsh's `/` endpoint renders its welcome page on every request; measured
+ * latency on a busy host is 0.9-2 s, and a proxy adds more. The old hardcoded
+ * 800 ms probe therefore always timed out and the manager reported a false
+ * "Browsh did not start in HTTP mode within timeout" even though the endpoint
+ * was answering HTTP 200. Five seconds absorbs normal render latency while a
+ * genuinely absent endpoint still fails quickly inside the startup budget.
+ */
+export const DEFAULT_HEALTH_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * Shared message for the startup health-probe timeout. The quarantine guard
+ * matches against this constant so a later wording or status-suffix change
+ * cannot silently restore profile quarantine on a slow-but-healthy browser.
+ */
+export const BROWSH_STARTUP_TIMEOUT_MESSAGE = "Browsh did not start in HTTP mode within timeout";
+
+/**
+ * True only when the error is the startup health-probe timeout.
+ *
+ * A pure probe timeout means the control page was slow, not that the Firefox
+ * profile is corrupt, so `ensureStarted` must skip quarantine for it. The
+ * substring match keeps a `FetchError` with an `[http <status>]` suffix
+ * recognised; a non-FetchError or any other boot error returns false and
+ * leaves the quarantine path intact for genuine path and lock failures.
+ */
+export function isStartupProbeTimeout(e: unknown): boolean {
+  if (!(e instanceof FetchError)) return false;
+  const msg: unknown = (e as Error).message;
+  return typeof msg === "string" && msg.includes(BROWSH_STARTUP_TIMEOUT_MESSAGE);
+}
 
 /**
  * Resolve the render-path budgets the same way the constructor does, so a test
@@ -89,11 +122,13 @@ export function resolveRenderTimeouts(env: NodeJS.ProcessEnv = process.env): {
   render: number;
   queue: number;
   startup: number;
+  probe: number;
 } {
   return {
     render: clampIntEnv(env.BROWSH_REQUEST_TIMEOUT_MS, 10_000, 600_000, DEFAULT_RENDER_TIMEOUT_MS, "BROWSH_REQUEST_TIMEOUT_MS"),
     queue: clampIntEnv(env.BROWSH_QUEUE_TIMEOUT_MS, 10_000, 1_200_000, DEFAULT_QUEUE_TIMEOUT_MS, "BROWSH_QUEUE_TIMEOUT_MS"),
     startup: clampIntEnv(env.BROWSH_STARTUP_TIMEOUT_MS, 10_000, 600_000, DEFAULT_STARTUP_TIMEOUT_MS, "BROWSH_STARTUP_TIMEOUT_MS"),
+    probe: clampIntEnv(env.BROWSH_HEALTH_PROBE_TIMEOUT_MS, 1_000, 60_000, DEFAULT_HEALTH_PROBE_TIMEOUT_MS, "BROWSH_HEALTH_PROBE_TIMEOUT_MS"),
   };
 }
 
@@ -313,6 +348,7 @@ class BrowshManager {
   private readonly requestTimeoutMs: number;
   private readonly queueTimeoutMs: number;
   private readonly startupTimeoutMs: number;
+  private readonly healthProbeTimeoutMs: number;
   private readonly recycleThreshold: number;
   private readonly idleTimeoutMs: number;
   private readonly profileDir: string;
@@ -362,6 +398,10 @@ class BrowshManager {
     // browser about one second before it was ready and every first fetch after
     // a container start failed. Raised to 120s for slow hosts. Configurable.
     this.startupTimeoutMs = budgets.startup;
+    // Per-probe budget for the health check. The overall startup window above
+    // still bounds the loop; this only stops a slow-but-healthy control page
+    // from being mistaken for a dead browser.
+    this.healthProbeTimeoutMs = budgets.probe;
     this.recycleThreshold = Number(process.env.BROWSH_RECYCLE_REQUESTS) || 100;
     this.idleTimeoutMs = Number(process.env.BROWSH_IDLE_TIMEOUT_MS) || 600_000;
     // Persistent Firefox profile: Browsh 1.8.0 offers no profile-dir flag, so
@@ -422,10 +462,18 @@ class BrowshManager {
       ensureFirefoxProxyPrefs(this.profileDir, resolveProxyConfig(process.env));
       await this.spawnAndWait();
     } catch (e) {
-      // Any boot-path failure (mkdir blocked by a file, spawn timeout from a
-      // stale lock / torn storage): quarantine the path, start fresh, warn
-      // loudly. Retry ONLY when quarantine actually moved the path aside;
-      // otherwise rethrow (bounded, never loops).
+      // A pure health-probe timeout means the control page was slow, not that
+      // the profile is corrupt. Quarantining here would discard a healthy
+      // profile and pay a second full startup budget for no reason. Surface
+      // the real error and let the caller decide; quarantine stays reserved
+      // for path/lock failures that actually justify a fresh profile.
+      if (isStartupProbeTimeout(e)) {
+        throw e;
+      }
+      // Any other boot-path failure (mkdir blocked by a file, stale lock, torn
+      // storage): quarantine the path, start fresh, warn loudly. Retry ONLY
+      // when quarantine actually moved the path aside; otherwise rethrow
+      // (bounded, never loops).
       const backup = quarantineProfileDir(this.profileDir);
       if (backup === null) {
         throw e;
@@ -535,7 +583,7 @@ class BrowshManager {
     const ready = await this.waitForReady(this.startupTimeoutMs);
     if (!ready) {
       await this.shutdown();
-      throw new FetchError(`Browsh did not start in HTTP mode within timeout`);
+      throw new FetchError(BROWSH_STARTUP_TIMEOUT_MESSAGE);
     }
   }
 
@@ -546,7 +594,7 @@ class BrowshManager {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       try {
-        const res = await axios.get(endpoint, { timeout: 800 });
+        const res = await axios.get(endpoint, { timeout: this.healthProbeTimeoutMs });
         if (res.status >= 200 && res.status < 500) return true;
       } catch {}
       await new Promise((res) => setTimeout(res, 400));

@@ -282,6 +282,7 @@ Set these via `.env` (loaded automatically) or the environment:
 | `BROWSH_QUEUE_TIMEOUT_MS`   | `600000`      | How long a render may wait behind the serialized slot before it fails honestly (ms). Keep ≥ 2× the render timeout. |
 | `SEARCH_DEADLINE_MS`        | `900000`      | Default wall-clock budget for one `search_web` call when `deadline_ms` is omitted (ms). Keep ≥ queue wait + render timeout. |
 | `BROWSH_STARTUP_TIMEOUT_MS` | `120000`      | Cold-start budget for the Browsh HTTP endpoint (ms); the measured cold start is ~31 s. |
+| `BROWSH_HEALTH_PROBE_TIMEOUT_MS` | `5000`   | Per-probe timeout for the startup health check (ms, clamped 1000-60000). Browsh re-renders its welcome page on every probe (~1 s here), so a probe shorter than that reports a false startup timeout. |
 | `SEARCH_BLOCKED_ENGINE_TTL_MS` | `600000`   | How long an engine that answered with a bot-block page is remembered and skipped (10 min). |
 | `ENRICH_BUDGET_MS` | `180000` | Wall-clock budget for the `search_web` enrich phase (ms); each enrichment is a full render. |
 | `PDF_MAX_BYTES`             | `20971520`    | Max PDF file size in bytes for `fetch_web type: pdf`.                    |

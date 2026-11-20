@@ -22,13 +22,18 @@
  *     silently producing false timeouts.
  */
 
+import fs from "node:fs";
 import {
+  BROWSH_STARTUP_TIMEOUT_MESSAGE,
+  DEFAULT_HEALTH_PROBE_TIMEOUT_MS,
   DEFAULT_QUEUE_TIMEOUT_MS,
   DEFAULT_RENDER_TIMEOUT_MS,
   DEFAULT_STARTUP_TIMEOUT_MS,
   RenderQueue,
+  isStartupProbeTimeout,
   resolveRenderTimeouts,
 } from "../src/browshManager.js";
+import { FetchError } from "../src/errors.js";
 import {
   ENRICH_BUDGET_MS,
   MAX_SEARCH_DEADLINE_MS,
@@ -255,6 +260,19 @@ function testLadder(): void {
   check("render timeout is positive", render > 0);
   check("startup budget funds the measured ~31s cold start", DEFAULT_STARTUP_TIMEOUT_MS >= 31_000);
   check("search budget is inside the deadline band", search >= 500 && search <= MAX_SEARCH_DEADLINE_MS);
+  // The health probe must outlast a real render of Browsh's welcome page
+  // (measured ~0.9-2 s here). The old hardcoded 800 ms made startup fail even
+  // though the endpoint was answering 200.
+  check(
+    `health probe default (${DEFAULT_HEALTH_PROBE_TIMEOUT_MS}ms) outlasts a slow control page`,
+    DEFAULT_HEALTH_PROBE_TIMEOUT_MS >= 5_000
+  );
+  const probeLive = resolveRenderTimeouts({ BROWSH_HEALTH_PROBE_TIMEOUT_MS: "9000" } as NodeJS.ProcessEnv);
+  check("health probe timeout is configurable", probeLive.probe === 9_000, `got ${probeLive.probe}`);
+  // clampIntEnv rejects an out-of-band value and uses the safe default; it
+  // does not snap to the band edge. Assert that contract, not a clamp.
+  const probeOutOfBand = resolveRenderTimeouts({ BROWSH_HEALTH_PROBE_TIMEOUT_MS: "100" } as NodeJS.ProcessEnv);
+  check("out-of-band health probe falls back to the safe default", probeOutOfBand.probe === DEFAULT_HEALTH_PROBE_TIMEOUT_MS, `got ${probeOutOfBand.probe}`);
 
   // N3 (QA follow-up): the four checks above read the DEFAULT constants, so a
   // bad env combination that clamps each knob into its own band but breaks the
@@ -285,10 +303,27 @@ function testLadder(): void {
   );
 }
 
+function testStartupProbeGuard(): void {
+  const exact = new FetchError(BROWSH_STARTUP_TIMEOUT_MESSAGE);
+  check("probe guard matches exact startup timeout", isStartupProbeTimeout(exact) === true);
+  const suffixed = new FetchError(`${BROWSH_STARTUP_TIMEOUT_MESSAGE} [http 500]`);
+  check("probe guard matches suffixed message", isStartupProbeTimeout(suffixed) === true);
+  const other = new FetchError("mkdir blocked by file");
+  check("probe guard rejects other boot error", isStartupProbeTimeout(other) === false);
+  const generic = new Error(BROWSH_STARTUP_TIMEOUT_MESSAGE);
+  check("probe guard rejects non FetchError", isStartupProbeTimeout(generic) === false);
+  const src = fs.readFileSync("src/browshManager.ts", "utf8");
+  check("waitForReady uses configured probe timeout", src.includes("timeout: this.healthProbeTimeoutMs"));
+  check("hardcoded 800ms probe is gone", !src.includes("timeout: 800"));
+  const budgets = resolveRenderTimeouts({} as NodeJS.ProcessEnv);
+  check("probe stays below startup budget", budgets.probe < budgets.startup, `probe ${budgets.probe} startup ${budgets.startup}`);
+}
+
 async function main(): Promise<void> {
   await testRenderQueue();
   testBudget();
   testLadder();
+  testStartupProbeGuard();
   testBreaker();
 
   console.log("");
