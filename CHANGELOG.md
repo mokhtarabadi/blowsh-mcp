@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-11-21
+
 ### Fixed
 
 - False "Browsh did not start in HTTP mode within timeout" on slow hosts. The startup health probe in `src/browshManager.ts` used a hardcoded 800 ms axios timeout against Browsh's `/` endpoint, which re-renders the welcome page and takes ~0.9-2 s here, so every probe timed out while the endpoint was answering HTTP 200. Added `BROWSH_HEALTH_PROBE_TIMEOUT_MS` (default 5000, clamped 1000-60000) through `resolveRenderTimeouts`, and used it in `waitForReady`. The overall `BROWSH_STARTUP_TIMEOUT_MS` budget is unchanged. Also stopped quarantining a healthy Firefox profile on a pure probe timeout; quarantine remains reserved for path and lock failures. Regression assertions added to `tests/search-timeout-hardening-tests.ts`. See Task 269.
