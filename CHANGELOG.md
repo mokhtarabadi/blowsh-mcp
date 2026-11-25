@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Sweep orphaned Firefox for the Browsh profile on teardown, spawn, and unexpected exit; delete stale lock files only when pgrep confirms no process references the profile. Allowlisted profile paths (/data or os.tmpdir at depth 3+) and safe degrade when pkill/pgrep are missing. Regression coverage in `tests/browser-crash-circuit-tests.ts` (49 checks). See Task 270.
+
 ## [2.9.0] - 2026-11-21
 
 ### Fixed

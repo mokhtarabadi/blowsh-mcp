@@ -1,5 +1,5 @@
 // Sibling Docs: src/README.md | Decisions: src/DECISIONS.md
-import { spawn, ChildProcess } from "child_process";
+import { spawn, ChildProcess, execFileSync } from "child_process";
 import axios from "axios";
 import { FetchError } from "./errors.js";
 import { pageCache } from "./cache.js";
@@ -449,6 +449,9 @@ class BrowshManager {
       );
     }
     try {
+      // Clear any Firefox orphaned by a previous crash/restart and drop stale
+      // lock files before attempting a fresh spawn.
+      this.cleanupOrphanedFirefox();
       fs.mkdirSync(this.profileDir, { recursive: true });
       const entries = fs.readdirSync(this.profileDir).length;
       console.error(
@@ -564,6 +567,9 @@ class BrowshManager {
       this.process = null;
       this.warmup = null;
       this.lastCycleAt = Date.now();
+      // Browsh died but may have left Firefox behind; sweep it so the next
+      // spawn does not fight a stale profile lock.
+      this.cleanupOrphanedFirefox();
       this.totalCrashes++;
       const opened = this.crashCircuit.record(Date.now());
       // Only a true in-window storm arms quarantine. A lifetime totalCrashes
@@ -760,29 +766,141 @@ class BrowshManager {
   private clearProcess(): void {
     const proc = this.process;
     this.process = null;
-    if (!proc || proc.killed) return;
-    this.lastCycleAt = Date.now();
-    try {
-      // Negative PID = whole process group (requires detached: true on spawn).
-      process.kill(-proc.pid!, "SIGTERM");
-    } catch {
+    if (proc && !proc.killed) {
+      this.lastCycleAt = Date.now();
       try {
-        proc.kill("SIGKILL");
+        // Negative PID = whole process group (requires detached: true on spawn).
+        process.kill(-proc.pid!, "SIGTERM");
       } catch {
-        /* already gone */
-      }
-    }
-    // Belt-and-braces: if the group is still alive after 2s, force SIGKILL so
-    // the next restart never fights an orphaned Firefox/profile lock.
-    setTimeout(() => {
-      if (!proc.killed) {
         try {
-          process.kill(-proc.pid!, "SIGKILL");
+          proc.kill("SIGKILL");
         } catch {
           /* already gone */
         }
       }
-    }, 2000).unref();
+      // Belt-and-braces: if the group is still alive after 2s, force SIGKILL so
+      // the next restart never fights an orphaned Firefox/profile lock.
+      setTimeout(() => {
+        if (!proc.killed) {
+          try {
+            process.kill(-proc.pid!, "SIGKILL");
+          } catch {
+            /* already gone */
+          }
+        }
+      }, 2000).unref();
+    }
+    // Firefox can survive the group kill (it may be in its own session), so
+    // sweep any orphaned firefox for this profile and drop stale lock files.
+    // Without this, the next ensureStarted() sees "A headless Firefox is
+    // already running" and every render fails.
+    this.cleanupOrphanedFirefox();
+  }
+
+  /** True when profileDir is safe to target with pkill (allowlisted bases). Delegates to exported pure helper for testability. */
+  private isSafeProfilePathForKill(): boolean {
+    return isSafeProfilePathForKillPath(this.profileDir);
+  }
+
+  /** Synchronous in-process wait (avoids shelling out to sleep). */
+  private waitMsSync(ms: number): void {
+    if (ms <= 0) return;
+    const sab = new SharedArrayBuffer(4);
+    const view = new Int32Array(sab);
+    Atomics.wait(view, 0, 0, ms);
+  }
+
+  /** True when a process still references this profile; null when pgrep is unavailable. Delegates to exported pure helper. */
+  private hasMatchingProcess(): boolean | null {
+    return checkMatchingProcess(this.profileDir);
+  }
+
+  /** True when the pkill binary is available. Delegates to exported pure helper. */
+  private hasPkill(): boolean {
+    return checkPkillAvailable();
+  }
+
+  /** Kill any orphaned Firefox for this profile and remove stale lock files. */
+  private cleanupOrphanedFirefox(): void {
+    if (!this.isSafeProfilePathForKill()) {
+      console.error(
+        `[browshManager] cleanup REFUSED for unsafe profile dir: ${this.profileDir}`
+      );
+      return;
+    }
+    const profilePath = this.profileDir;
+    const firefoxProfile = path.join(profilePath, ".config", "browsh", "firefox_profile");
+    const pkillAvailable = this.hasPkill();
+    const kill = (signal: "TERM" | "KILL"): void => {
+      if (!pkillAvailable) return;
+      // Escape regex metacharacters so the profile path is matched literally.
+      const escaped = profilePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      try {
+        execFileSync("pkill", [signal === "TERM" ? "-TERM" : "-KILL", "-f", escaped], {
+          timeout: 5000,
+          stdio: "ignore",
+        });
+      } catch {
+        /* no matching process is fine */
+      }
+    };
+    // Skip wait when pkill is missing, no kill was attempted.
+    if (pkillAvailable) {
+      kill("TERM");
+      this.waitMsSync(2000);
+      kill("KILL");
+    }
+    // Only delete lock files once no Firefox process still references the
+    // profile; deleting them while a process is alive would corrupt state.
+    // If pkill or pgrep is missing, skip lock deletion entirely.
+    const remaining = this.hasMatchingProcess();
+    if (!shouldDeleteOrphanLocks(remaining, pkillAvailable)) {
+      if (remaining === null) {
+        console.error(
+          `[browshManager] pgrep unavailable; skipping lock deletion for ${profilePath}`
+        );
+      } else if (remaining) {
+        console.error(
+          `[browshManager] orphan Firefox still alive; skipping lock deletion for ${profilePath}`
+        );
+      } else {
+        console.error(
+          `[browshManager] pkill unavailable; skipping lock deletion for ${profilePath}`
+        );
+      }
+      return;
+    }
+    const lockPaths = resolveOrphanLockPaths(profilePath);
+    try {
+      const mozDir = path.join(firefoxProfile);
+      if (fs.existsSync(mozDir)) {
+        for (const entry of fs.readdirSync(mozDir)) {
+          const p = path.join(mozDir, entry);
+          try {
+            if (fs.statSync(p).isDirectory()) {
+              for (const f of ["lock", ".parentlock"]) {
+                try {
+                  fs.rmSync(path.join(p, f), { force: true });
+                } catch {
+                  /* ignore */
+                }
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    for (const lp of lockPaths) {
+      try {
+        fs.rmSync(lp, { force: true });
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   /**
@@ -924,4 +1042,92 @@ export function quarantineProfileDir(profileDir: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Allowlist check for orphan Firefox cleanup.
+ * True only when profileDir resolves under /data or os.tmpdir, is not the base itself, and depth is 3 or more.
+ * Split from the private method so regression tests prove refusal without shelling pkill.
+ */
+export function isSafeProfilePathForKillPath(profileDir: string): boolean {
+  // Resolve symlinks and relative segments before allowlist comparison.
+  const resolved = path.resolve(profileDir);
+  const dataRoot = path.resolve("/data");
+  const tmpRoot = path.resolve(os.tmpdir());
+  // Allow exact base plus separator to avoid prefix trick like /data-evil.
+  const under = (root: string): boolean =>
+    resolved === root || resolved.startsWith(root + path.sep);
+  // Depth counts leading empty segment, so /data/x is 3 and /data is 2.
+  const depth = resolved.split(path.sep).length;
+  return (
+    (under(dataRoot) && resolved !== dataRoot && depth >= 3) ||
+    (under(tmpRoot) && resolved !== tmpRoot && depth >= 3)
+  );
+}
+
+/**
+ * Resolve the three Firefox lock files for a Browsh profile.
+ * Does no I/O, so tests prove path wiring without touching disk.
+ */
+export function resolveOrphanLockPaths(profileDir: string): string[] {
+  // Browsh nests Firefox profile under .config/browsh/firefox_profile.
+  const firefoxProfile = path.join(profileDir, ".config", "browsh", "firefox_profile");
+  return [
+    path.join(profileDir, ".parentlock"),
+    path.join(firefoxProfile, ".parentlock"),
+    path.join(firefoxProfile, "lock"),
+  ];
+}
+
+/**
+ * Minimal exec interface for pkill and pgrep probes.
+ * Narrow struct lets tests pass stubs without real binaries.
+ */
+export type OrphanExecFn = (file: string, args: readonly string[], options: { timeout: number; stdio: string }) => unknown;
+
+/**
+ * True when pkill binary exists.
+ * pkill exit 1 means no match but binary present, so only ENOENT is false.
+ */
+export function checkPkillAvailable(execFn: OrphanExecFn = execFileSync as unknown as OrphanExecFn): boolean {
+  try {
+    // Probe version, never a kill pattern, so this call is side-effect free.
+    execFn("pkill", ["--version"], { timeout: 2000, stdio: "ignore" });
+    return true;
+  } catch (e: unknown) {
+    const code = (e as { code?: string } | null)?.code;
+    // ENOENT means binary missing, degrade safely.
+    if (code === "ENOENT") return false;
+    return true;
+  }
+}
+
+/**
+ * True when a process still references profile, false when none, null when pgrep missing.
+ * pgrep exit 1 means no match, only ENOENT maps to null.
+ */
+export function checkMatchingProcess(profileDir: string, execFn: OrphanExecFn = execFileSync as unknown as OrphanExecFn): boolean | null {
+  // Escape regex metacharacters so pgrep matches the profile path literally.
+  const escaped = profileDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  try {
+    // -f matches full command line containing the profile path.
+    execFn("pgrep", ["-f", escaped], { timeout: 5000, stdio: "ignore" });
+    return true;
+  } catch (e: unknown) {
+    const err = e as { code?: string; status?: number | null } | null;
+    // ENOENT means binary missing, degrade safely.
+    if (err?.code === "ENOENT") return null;
+    // Exit 1 means confirmed no match, only this case allows deletion.
+    if (err?.status === 1) return false;
+    // Timeout, permission, signal, other exits mean unknown, skip deletion.
+    return null;
+  }
+}
+
+/**
+ * Policy gate for lock deletion.
+ * Delete only when pgrep confirmed no match and pkill was available.
+ */
+export function shouldDeleteOrphanLocks(remaining: boolean | null, pkillAvailable: boolean): boolean {
+  return remaining === false && pkillAvailable === true;
 }

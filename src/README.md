@@ -21,4 +21,8 @@ Proxy configuration is additive and runs after the SSRF guard. `proxyConfig.ts` 
 
 `browshManager` owns one Browsh/Firefox child behind one FIFO mutex. An unexpected child exit is detected through the `exit`/`error` events (not `ChildProcess.killed`, which stays false on a self-exit), counted by the exported timer-free `CrashCircuit`, and answered by rejecting new renders during a cooldown plus quarantining the suspect profile. Intentional recycle, idle-kill, and shutdown null the process reference before killing, so they are never counted as crashes. Quarantine arms on `stormPending`, set only when a configured-size crash burst opens the circuit, so spaced crashes over a long uptime never move the profile; the lifetime `totalCrashes` field is observability only. `queuePressure` lets optional caller work shed itself instead of growing the queue.
 
+### Orphan Firefox cleanup
+
+Group SIGTERM sweep of orphaned Firefox for the Browsh profile on teardown, spawn, and unexpected exit. Allowlist under /data or os.tmpdir at depth 3+. pkill TERM, wait 2 s, then KILL. pgrep gate before lock delete. Safe degrade on missing pkill/pgrep. Same sweep before spawn and on child exit.
+
 Sibling docs: this file plus `DECISIONS.md` (dated ADRs for the server-side modules). Tool-level records live in `tools/README.md` and `tools/DECISIONS.md`. Every `.ts` file in this tree carries a one-line `// Sibling Docs:` pointer at the top.

@@ -123,3 +123,23 @@ Sibling of `src/README.md`. Tool-level records live in `src/tools/DECISIONS.md`.
 **Consequences.** A slow-but-healthy browser is now detected in one probe instead of failing after the whole startup budget. Worst-case failure detection inside startup rises from 800 ms to 5 s per probe, still bounded by the startup loop. Operators on unusually slow hosts can raise the knob without touching the render ladder.
 
 **Rollback.** Restore the literal `800` in `waitForReady`, remove the `probe` field and env knob, and delete the timeout guard in `ensureStarted`. No data migration.
+
+## 2026-11-25 — Orphan Firefox cleanup is allowlisted and gated
+
+**Context.** `clearProcess()` SIGTERMs the Browsh process group, but Firefox can survive in its own session and keep the profile lock. The next `ensureStarted()` then fails with "A headless Firefox is already running", and every render breaks. A naive `pkill -f <profile>` could target an unintended process if `BROWSH_PROFILE_DIR` is misconfigured, and deleting lock files while Firefox is alive would corrupt profile state.
+
+**Decision.** `cleanupOrphanedFirefox()` now (a) allowlists `profileDir` to `/data` or the OS temp dir at depth 3 or deeper via `isSafeProfilePathForKill`, refusing anything else; (b) sends TERM, waits 2000 ms, then sends KILL to any process matching the profile path; (c) gates lock-file deletion on `hasMatchingProcess` (pgrep), deleting `.parentlock`/`lock` files only when no Firefox process still references the profile. The same cleanup runs on unexpected child exit and before a fresh spawn.
+
+**Consequences.** A misconfigured profile path can no longer trigger a broad pkill, and lock files are never removed from under a live Firefox. Idle/recycle respawn no longer fights a stale profile lock. The 2 s wait adds latency to teardown but bounds orphan survival.
+
+**Rollback.** Remove the three helpers and restore the previous lock deletion block; revert the call sites in `ensureStarted` and the exit listener.
+
+## 2026-11-25 — Tool-missing safety for orphan cleanup
+
+**Context.** On minimal images `pkill` or `pgrep` may be absent. Running them unconditionally would throw, and deleting lock files without a confirmed process check risks corrupting a live profile.
+
+**Decision.** `hasPkill()` and `hasMatchingProcess()` detect missing binaries (ENOENT). When either tool is missing, lock deletion is skipped. TERM waits 2000 ms in-process via `waitMsSync` (Atomics.wait) before KILL, so no external `sleep` dependency is required.
+
+**Consequences.** Orphan cleanup degrades safely on minimal containers: it never crashes the server and never deletes locks without a pgrep confirmation. The 2 s in-process wait blocks the event loop briefly during teardown.
+
+**Rollback.** Replace `waitMsSync` with `execFileSync("sleep", ["2"])` and remove the ENOENT guards.

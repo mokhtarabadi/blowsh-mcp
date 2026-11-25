@@ -21,7 +21,14 @@ import {
   DEFAULT_CRASH_THRESHOLD,
   DEFAULT_CRASH_WINDOW_MS,
   browshManager,
+  isSafeProfilePathForKillPath,
+  resolveOrphanLockPaths,
+  checkPkillAvailable,
+  checkMatchingProcess,
+  shouldDeleteOrphanLocks,
 } from "../src/browshManager.js";
+import * as os from "node:os";
+import * as path from "node:path";
 import { browserQueueLoaded, isQueueLoaded } from "../src/tools/searchWeb.js";
 import { createDeadlineError, isDeadlineHitError } from "../src/errors.js";
 
@@ -112,9 +119,57 @@ function testLoadSheddingAndDeadline(): void {
   check("ordinary error is not a deadline hit", isDeadlineHitError(new Error("other")) === false);
 }
 
+function testOrphanCleanup(): void {
+  console.log("\n[Orphan Firefox cleanup — allowlist and tool-missing safety]");
+  // Allowlist refusal: only /data or tmpdir at depth 3 plus passes.
+  check("allowlisted data profile passes", isSafeProfilePathForKillPath("/data/browsh-profile") === true);
+  const tmpProfile = path.join(os.tmpdir(), "browsh-profile-test");
+  check("allowlisted tmp profile passes", isSafeProfilePathForKillPath(tmpProfile) === true);
+  check("root refuses", isSafeProfilePathForKillPath("/") === false);
+  check("data root itself refuses", isSafeProfilePathForKillPath("/data") === false);
+  check("outside bases refuses", isSafeProfilePathForKillPath("/etc/passwd") === false);
+  check("tmp root itself refuses", isSafeProfilePathForKillPath(os.tmpdir()) === false);
+  // Tool-missing safety via stubbed exec, no real pkill or pgrep runs here.
+  const throwEnoent = (): unknown => {
+    const e = new Error("spawn ENOENT") as Error & { code: string };
+    e.code = "ENOENT";
+    throw e;
+  };
+  const throwNoMatch = (): unknown => {
+    const e = new Error("no match") as Error & { status: number };
+    (e as unknown as { status: number }).status = 1;
+    throw e;
+  };
+  const returnOk = (): unknown => Buffer.from("");
+  const throwTimeout = (): unknown => {
+    const e = new Error("timeout") as Error & { code: string };
+    e.code = "ETIMEDOUT";
+    (e as unknown as { status: null }).status = null;
+    throw e;
+  };
+  check("pkill missing returns false", checkPkillAvailable(throwEnoent) === false);
+  check("pkill present returns true even on no match", checkPkillAvailable(throwNoMatch) === true);
+  check("pgrep missing returns null", checkMatchingProcess("/data/browsh-profile", throwEnoent) === null);
+  check("pgrep no match returns false", checkMatchingProcess("/data/browsh-profile", throwNoMatch) === false);
+  check("pgrep match returns true", checkMatchingProcess("/data/browsh-profile", returnOk) === true);
+  check("pgrep timeout returns null", checkMatchingProcess("/data/browsh-profile", throwTimeout) === null);
+  check("prefix trick refuses", isSafeProfilePathForKillPath("/data-evil") === false);
+  check("relative outside refuses", isSafeProfilePathForKillPath("data/browsh-profile") === false);
+  // Lock deletion gated only on confirmed no process plus pkill present.
+  check("deletes only when no process and pkill present", shouldDeleteOrphanLocks(false, true) === true);
+  check("skips when process still alive", shouldDeleteOrphanLocks(true, true) === false);
+  check("skips when pgrep missing", shouldDeleteOrphanLocks(null, true) === false);
+  check("skips when pkill missing", shouldDeleteOrphanLocks(false, false) === false);
+  // Resolver wiring.
+  const locks = resolveOrphanLockPaths("/data/browsh-profile");
+  check("resolves three lock paths", locks.length === 3);
+  check("first lock is profile parentlock", locks[0] === path.join("/data/browsh-profile", ".parentlock"));
+}
+
 async function main(): Promise<void> {
   testCircuit();
   testLoadSheddingAndDeadline();
+  testOrphanCleanup();
 
   console.log("\n[Render-slot pressure — load shedding]");
   const pressure = browshManager.queuePressure;
