@@ -38,7 +38,7 @@ blowsh-mcp/
 [MCP Client / AI Agent]
       │  JSON-RPC (stdio)
       ▼
-[MCP Server: blowsh-mcp 2.9.1]
+[MCP Server: blowsh-mcp 2.9.2]
    ├─ tools: fetch_web, search_web, crawl_web, extract_links, fetch_web_batch
    ├─ assertSafeUrl()  ──►  SSRF blocklist (private/loopback/link-local)
    ├─ pageCache (TTL)  ──►  repeated calls served without re-render
@@ -56,7 +56,7 @@ blowsh-mcp/
 
 ### 3.1. MCP Server (`src/server.ts`)
 
-- Registers five tools (SDK 1.30 `ToolSchema`) — `fetch_web`, `search_web`, `crawl_web`, `extract_links`, `fetch_web_batch` — validates args with zod 4, routes to `src/tools/*`, wraps errors into `isError: true` responses. Reported version is 2.9.1 (matches package.json).
+- Registers five tools (SDK 1.30 `ToolSchema`) — `fetch_web`, `search_web`, `crawl_web`, `extract_links`, `fetch_web_batch` — validates args with zod 4, routes to `src/tools/*`, wraps errors into `isError: true` responses. Reported version is 2.9.2 (matches package.json).
 - Transport: `StdioServerTransport` (line-delimited JSON-RPC).
 - Lifecycle: graceful SIGINT/SIGTERM/exit shutdown → `browshManager.shutdown()`.
 
@@ -98,7 +98,7 @@ blowsh-mcp/
 ## 6. Deployment & Infrastructure
 
 - **Provider:** Any server with Docker; runs completely offline-of-host once the image is pulled.
-- **Distribution:** Prebuilt image on GitHub Container Registry — `ghcr.io/mokhtarabadi/blowsh-mcp:latest` (also tagged `2.9.1`, branch, semver, and `sha-<sha>`). Pull with `docker pull ghcr.io/mokhtarabadi/blowsh-mcp:latest`.
+- **Distribution:** Prebuilt image on GitHub Container Registry — `ghcr.io/mokhtarabadi/blowsh-mcp:latest` (also tagged `2.9.2`, branch, semver, and `sha-<sha>`). Pull with `docker pull ghcr.io/mokhtarabadi/blowsh-mcp:latest`.
 - **CI/CD:** GitHub Actions (`.github/workflows/docker-publish.yml`) builds the Dockerfile and pushes to ghcr on `main` pushes and `v*` tags, with a container smoke test (MCP initialize → tools/list) before the run completes.
 - **Form factor:** MCP server over stdio by default (no listening port). Optional singleton modes share one supervised instance: streamable HTTP (`MCP_TRANSPORT=http`, default 127.0.0.1:8107) and legacy SSE (`MCP_TRANSPORT=sse`, default 127.0.0.1:8108). The Browsh HTTP port stays container-private.
 
