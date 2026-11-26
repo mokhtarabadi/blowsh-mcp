@@ -108,10 +108,24 @@ export function resolveProxyConfig(env: NodeJS.ProcessEnv = process.env): ProxyC
 }
 
 /**
+ * Deterministic WebRTC hardening appended to every generated `user.js`.
+ *
+ * Disables peer connections and forbids host candidates so Firefox WebRTC
+ * cannot expose the host public IP or local/private interface addresses,
+ * including when Browsh runs behind an upstream proxy. Applied in direct,
+ * HTTP, and SOCKS5 modes. Secure by default with no opt-out knob.
+ */
+const WEBRTC_HARDENING_PREFS: string[] = [
+  'user_pref("media.peerconnection.enabled", false);',
+  'user_pref("media.peerconnection.ice.proxy_only", true);',
+  'user_pref("media.peerconnection.ice.no_host", true);',
+];
+
+/**
  * Build the Firefox `user.js` content for the resolved configuration.
  *
- * Direct mode writes exactly one preference so a stale file left on the
- * `/data/browsh-profile` volume cannot keep a proxy active. String values are
+ * Direct mode writes proxy type 0 plus WebRTC hardening so a stale file left on the
+ * `/data/browsh-profile` volume cannot keep a proxy active or leak IPs. String values are
  * JSON-escaped; integers and booleans are emitted raw, matching Browsh's
  * Marionette preference setter.
  *
@@ -119,7 +133,7 @@ export function resolveProxyConfig(env: NodeJS.ProcessEnv = process.env): ProxyC
  * @returns complete `user.js` text, ending with a newline.
  */
 export function buildFirefoxUserJs(config: ProxyConfig): string {
-  if (config.type === "none") return 'user_pref("network.proxy.type", 0);\n';
+  if (config.type === "none") return ['user_pref("network.proxy.type", 0);', ...WEBRTC_HARDENING_PREFS].join("\n") + "\n";
   const lines: string[] = ['user_pref("network.proxy.type", 1);'];
   const noProxies = config.bypass.join(", ");
   if (config.type === "http") {
@@ -137,6 +151,7 @@ export function buildFirefoxUserJs(config: ProxyConfig): string {
   lines.push(`user_pref("network.proxy.no_proxies_on", ${JSON.stringify(noProxies)});`);
   if (config.username.length > 0) lines.push(`user_pref("network.proxy.username", ${JSON.stringify(config.username)});`);
   if (config.password.length > 0) lines.push(`user_pref("network.proxy.password", ${JSON.stringify(config.password)});`);
+  lines.push(...WEBRTC_HARDENING_PREFS);
   return lines.join("\n") + "\n";
 }
 

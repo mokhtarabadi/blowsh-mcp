@@ -143,3 +143,15 @@ Sibling of `src/README.md`. Tool-level records live in `src/tools/DECISIONS.md`.
 **Consequences.** Orphan cleanup degrades safely on minimal containers: it never crashes the server and never deletes locks without a pgrep confirmation. The 2 s in-process wait blocks the event loop briefly during teardown.
 
 **Rollback.** Replace `waitMsSync` with `execFileSync("sleep", ["2"])` and remove the ENOENT guards.
+
+## 2026-11-26 — Prevent WebRTC IP leaks behind an upstream proxy
+
+**Context.** BrowserLeaks through the proxied Browsh singleton showed HTTP egress from the WARP address while the WebRTC section exposed the VPS public IP `194.76.154.73`. The generated Firefox `user.js` contained only `network.proxy.*` preferences, so Firefox WebRTC remained free to gather host candidates outside the proxy path.
+
+**Decision.** Append the same secure-by-default policy to every generated `user.js`: `media.peerconnection.enabled=false`, `media.peerconnection.ice.proxy_only=true`, and `media.peerconnection.ice.no_host=true`. Apply it in direct, HTTP, and SOCKS5 modes. Keep the six-variable `PROXY_*` contract unchanged, add no opt-out knob, preserve loopback bypass for the local control channel, and rely on the existing every-boot overwrite instead of editing `prefs.js`.
+
+**Alternatives rejected.** An opt-out environment knob was rejected because the leak is a security default and no supported use case requires WebRTC in this research browser. Direct `prefs.js` surgery was rejected because persistent profile state can shadow generated policy. A one-off production profile edit was rejected because it is not reproducible or preserved across deployments.
+
+**Consequences.** Firefox WebRTC cannot expose the host public IP or local/private interface addresses, while HTTP and SOCKS5 proxy routing plus the `127.0.0.1:4333` control channel remain intact. Sites that require real-time media lose WebRTC, which is the intended secure default for Browsh.
+
+**Rollback.** Remove the WebRTC preference block and its regression tests, rebuild the image, and reset the affected profile volume if old Firefox state must be discarded.

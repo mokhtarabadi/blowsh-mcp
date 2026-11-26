@@ -163,7 +163,7 @@ check("T8 stale manual user.js is overwritten by deterministic direct mode", () 
     fs.writeFileSync(target, 'user_pref("network.proxy.type", 1);\nuser_pref("network.proxy.http", "stale");\n');
     ensureFirefoxProxyPrefs(profileDir, resolveProxyConfig({}));
     const content = fs.readFileSync(target, "utf8");
-    assert.equal(content, 'user_pref("network.proxy.type", 0);\n');
+    assert.equal(content, 'user_pref("network.proxy.type", 0);\nuser_pref("media.peerconnection.enabled", false);\nuser_pref("media.peerconnection.ice.proxy_only", true);\nuser_pref("media.peerconnection.ice.no_host", true);\n');
   } finally {
     fs.rmSync(profileDir, { recursive: true, force: true });
   }
@@ -220,6 +220,74 @@ check("HOTFIX dual NO_PROXY casings both preserved plus loopbacks", () => {
   assert.ok(env.NO_PROXY?.includes("localhost"));
   assert.ok(env.NO_PROXY?.includes("127.0.0.1"));
   assert.equal(env.no_proxy, env.NO_PROXY);
+});
+
+// T10 — direct mode includes deterministic WebRTC hardening.
+check("T10 direct mode includes WebRTC hardening", () => {
+  const config = resolveProxyConfig({ PROXY_TYPE: "none" });
+  const userJs = buildFirefoxUserJs(config);
+  assert.ok(userJs.includes('user_pref("media.peerconnection.enabled", false);'));
+  assert.ok(userJs.includes('user_pref("media.peerconnection.ice.proxy_only", true);'));
+  assert.ok(userJs.includes('user_pref("media.peerconnection.ice.no_host", true);'));
+});
+// T11 — HTTP mode includes WebRTC hardening alongside proxy prefs.
+check("T11 http mode includes WebRTC hardening", () => {
+  const config = resolveProxyConfig({ PROXY_TYPE: "http", PROXY_HOST: "proxy.example.com", PROXY_PORT: "8080" });
+  const userJs = buildFirefoxUserJs(config);
+  assert.ok(userJs.includes('user_pref("network.proxy.http", "proxy.example.com");'));
+  assert.ok(userJs.includes('user_pref("media.peerconnection.enabled", false);'));
+  assert.ok(userJs.includes('user_pref("media.peerconnection.ice.proxy_only", true);'));
+  assert.ok(userJs.includes('user_pref("media.peerconnection.ice.no_host", true);'));
+  assert.ok(userJs.includes("localhost"));
+  assert.ok(userJs.includes("127.0.0.1"));
+});
+// T12 — SOCKS5 mode includes WebRTC hardening alongside socks prefs.
+check("T12 socks5 mode includes WebRTC hardening", () => {
+  const config = resolveProxyConfig({ PROXY_TYPE: "socks5", PROXY_HOST: "socks.example.com", PROXY_PORT: "1080" });
+  const userJs = buildFirefoxUserJs(config);
+  assert.ok(userJs.includes('user_pref("network.proxy.socks", "socks.example.com");'));
+  assert.ok(userJs.includes('user_pref("network.proxy.socks_remote_dns", true);'));
+  assert.ok(userJs.includes('user_pref("media.peerconnection.enabled", false);'));
+  assert.ok(userJs.includes('user_pref("media.peerconnection.ice.proxy_only", true);'));
+  assert.ok(userJs.includes('user_pref("media.peerconnection.ice.no_host", true);'));
+});
+// T13 — stale user.js overwrite gains WebRTC policy in all modes.
+check("T13 stale user.js overwrite gains WebRTC policy in all modes", () => {
+  const modes = [{ PROXY_TYPE: "none" }, { PROXY_TYPE: "http", PROXY_HOST: "proxy.example.com", PROXY_PORT: "8080" }, { PROXY_TYPE: "socks5", PROXY_HOST: "socks.example.com", PROXY_PORT: "1080" }];
+  for (const env of modes) {
+    const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "blowsh-webrtc-test-"));
+    try {
+      const target = path.join(profileDir, ".config", "browsh", "firefox_profile", "user.js");
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, 'user_pref("network.proxy.type", 1);\nuser_pref("network.proxy.http", "stale");\n');
+      ensureFirefoxProxyPrefs(profileDir, resolveProxyConfig(env));
+      const content = fs.readFileSync(target, "utf8");
+      assert.ok(!content.includes('"stale"'));
+      assert.ok(content.includes('user_pref("media.peerconnection.enabled", false);'));
+      assert.ok(content.includes('user_pref("media.peerconnection.ice.proxy_only", true);'));
+      assert.ok(content.includes('user_pref("media.peerconnection.ice.no_host", true);'));
+    } finally {
+      fs.rmSync(profileDir, { recursive: true, force: true });
+    }
+  }
+});
+// T14 — WebRTC prefs do not log credentials.
+check("T14 webrtc prefs do not log credentials", () => {
+  const config = resolveProxyConfig({ PROXY_TYPE: "http", PROXY_HOST: "proxy.example.com", PROXY_PORT: "8080", PROXY_USERNAME: "user@name", PROXY_PASSWORD: 'p@ss/word:"x' });
+  const logged: string[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  console.error = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+  try {
+    buildFirefoxUserJs(config);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+  assert.ok(!logged.some((line) => line.includes("p@ss")));
+  const userJs = buildFirefoxUserJs(config);
+  assert.ok(userJs.includes('user_pref("media.peerconnection.enabled", false);'));
 });
 
 console.log(`\n${checks - failures}/${checks} checks passed`);

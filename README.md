@@ -310,8 +310,9 @@ Firefox ignores those environment variables, so the server writes
 `<BROWSH_PROFILE_DIR>/.config/browsh/firefox_profile/user.js` before every
 Browsh spawn. With the default profile root that is
 `/data/browsh-profile/.config/browsh/firefox_profile/user.js`. The file is
-rewritten on every boot; when `PROXY_TYPE=none` it contains only
-`network.proxy.type=0`, so a stale proxy on a reused volume cannot survive.
+rewritten on every boot; when `PROXY_TYPE=none` it contains
+`network.proxy.type=0` plus the WebRTC hardening block, so a stale proxy on a
+reused volume cannot survive and WebRTC cannot expose host addresses.
 
 Prerequisites:
 
@@ -360,7 +361,8 @@ Or put the same keys in `.env` and use `--env-file .env` instead of repeated
 and restart; the server overwrites `user.js` automatically. If Firefox still
 uses the old proxy, reset the profile volume (for example
 `docker volume rm blowsh-profile`) because `prefs.js` can retain values from an
-earlier session.
+earlier session. The same volume reset clears stale WebRTC policy; `user.js` is
+overwritten automatically on restart.
 
 ---
 

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Wayback archive rescue no longer treats the availability API's transient timeout payload as a genuine miss. `classifyWaybackAvailability` now returns `api-error` for error-bearing payloads, `fetchWaybackOutcome` retries once, then queries CDX with `filter=statuscode:200&limit=1`. `archive: "only"` still throws `archive.stale` only on a true miss, `archive: "auto"` still rethrows the original live error when no snapshot exists, and `deadline.hit` remains rescue-ineligible. Empty-extraction failures now qualify for archive rescue. Regression coverage in `tests/task10-stress-fixes.ts` (31 checks). See Task 266.
+- Firefox WebRTC no longer exposes host public or local/private IPs through Browsh. Every generated `user.js` now appends `media.peerconnection.enabled=false`, `media.peerconnection.ice.proxy_only=true`, and `media.peerconnection.ice.no_host=true` in direct, HTTP, and SOCKS5 modes. The six `PROXY_*` variables, proxy routing, loopback bypass, and every-boot profile overwrite remain unchanged. Regression coverage in `tests/proxy-config-tests.ts` (22 checks). See Task 272.
 
 ## [2.9.1] - 2026-11-25
 
