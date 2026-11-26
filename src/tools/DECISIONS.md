@@ -76,3 +76,13 @@ The invariant is asserted in `tests/search-timeout-hardening-tests.ts` (the `tim
 **Consequences.** Deadline expiry always surfaces as `deadline.hit`; the outer race runs `fetchCheapFallback` as designed. Merge order and dedup are unchanged.
 
 **Rollback.** Restore `if (budgetController.signal.aborted) break;` and inline the pressure check. No env or schema changes.
+
+## 2026-11-26 — Wayback API failure is retried, then rescued through CDX
+
+**Context.** `classifyWaybackAvailability` treated an HTTP 200 payload carrying `error: { code: "timeout" }` and empty `archived_snapshots` as a genuine miss. Popular URLs such as `https://www.yahoo.com` therefore failed `archive="only"` even though CDX returned a valid snapshot. The rescue also treated empty-extraction failures as non-hard, so a failed live render could not fall back to an archived page.
+
+**Decision.** Keep the availability API as the low-latency fast path. Classify error-bearing payloads as `api-error`, retry availability once on payload or transport failure, then query the SSRF-guarded CDX endpoint with `filter=statuscode:200&limit=1`. Preserve `no-snapshot` only for an error-free availability miss or an empty CDX result, preserve `snapshot-fetch-failed` for unusable snapshot bodies, and keep `deadline.hit` rescue-ineligible. Empty-extraction errors now count as hard failures.
+
+**Consequences.** Archived pages remain recoverable when the availability API times out. A failed rescue pays at most one extra availability request and one CDX request. Existing `archive.stale`, original-error rethrow, banner, cache, and deadline contracts remain unchanged.
+
+**Rollback.** Restore the prior classifier and `fetchWaybackOutcome` bodies and remove the empty-extraction branch from `isHardFailure`. The new regression checks then fail as the intended signal.

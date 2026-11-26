@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Wayback archive rescue no longer treats the availability API's transient timeout payload as a genuine miss. `classifyWaybackAvailability` now returns `api-error` for error-bearing payloads, `fetchWaybackOutcome` retries once, then queries CDX with `filter=statuscode:200&limit=1`. `archive: "only"` still throws `archive.stale` only on a true miss, `archive: "auto"` still rethrows the original live error when no snapshot exists, and `deadline.hit` remains rescue-ineligible. Empty-extraction failures now qualify for archive rescue. Regression coverage in `tests/task10-stress-fixes.ts` (31 checks). See Task 266.
+
 ## [2.9.1] - 2026-11-25
 
 ### Fixed

@@ -24,6 +24,10 @@ A render that produces no usable text is an error, never a success body.
 - **Fallback:** markdown conversion retries once from the full DOM (`convertMarkdownWithRetry`) when the readability pass narrowed to an empty shell while the DOM still held text, and only then fails.
 - **Cache:** `pageCache` stores only content the guard already accepted; an empty body is never cached.
 
+## Wayback rescue contract (`fetch_web`)
+
+The availability API remains the fast path. An error-bearing payload or transport failure is `api-error`, not `no-snapshot`, and is retried once before the rescue queries CDX with `filter=statuscode:200&limit=1`. A genuine miss keeps `archive.stale` for `archive="only"` and the original live error for `archive="auto"`. `deadline.hit` is never rescued, while empty-extraction failures are eligible because the live render failed.
+
 ## Search budgets and the render queue (`search_web`)
 
 A search is a chain of renders, and every render goes through one serialized browser slot. Without an explicit bound on that chain, a "parallel" search degrades into a long serial queue and the caller sees a hang.

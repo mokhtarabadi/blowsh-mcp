@@ -2,7 +2,7 @@
 // Run: npx tsx tests/task10-stress-fixes.ts (no network, no Browsh needed)
 import assert from "node:assert";
 import { FetchError, createDeadlineError, isDeadlineHitError, DEADLINE_HIT_CODE } from "../src/errors.js";
-import { isHardFailure, classifyWaybackAvailability, classifySnapshotBody } from "../src/tools/fetchWeb.js";
+import { isHardFailure, classifyWaybackAvailability, classifySnapshotBody, classifyCdxPayload, extractCdxSnapshot } from "../src/tools/fetchWeb.js";
 import { isEmptyResultDeadline } from "../src/tools/searchWeb.js";
 import { fetchWebBatch } from "../src/tools/fetchWebBatch.js";
 
@@ -33,6 +33,12 @@ check("deadline.hit is NOT hard (no archive rescue, documented)", () => {
 });
 check("generic Error is not hard", () => {
   assert.strictEqual(isHardFailure(new Error("boom")), false);
+});
+check("empty extraction message is hard so archive auto can rescue", () => {
+  assert.strictEqual(isHardFailure(new FetchError("empty extraction for https://x via render [dom 0 chars, text 0 chars]")), true);
+});
+check("empty extraction code is hard", () => {
+  assert.strictEqual(isHardFailure(new FetchError("empty extraction", { code: "empty.extraction" })), true);
 });
 
 // --- D2: Wayback availability classifier ---
@@ -120,6 +126,35 @@ check("SSRF-blocked items isolate per-URL (offline)", async () => {
     assert.strictEqual(items[i].ok, false);
     assert.ok(items[i].error && items[i].error.length > 0, "error text present");
   }
+});
+
+check("timeout payload with error object is api-error, not no-snapshot", () => {
+  assert.strictEqual(
+    classifyWaybackAvailability({ archived_snapshots: {}, error: { code: "timeout", message: "client timeout at 5.0 seconds" } }),
+    "api-error"
+  );
+});
+check("empty snapshots without error is no-snapshot", () => {
+  assert.strictEqual(classifyWaybackAvailability({ archived_snapshots: {} }), "no-snapshot");
+});
+check("empty snapshots with string error is api-error", () => {
+  assert.strictEqual(classifyWaybackAvailability({ archived_snapshots: {}, error: "timeout" }), "api-error");
+});
+check("valid CDX row is hit", () => {
+  const payload = [["timestamp", "original"], ["19961017235908", "http://www2.yahoo.com:80/"]];
+  assert.strictEqual(classifyCdxPayload(payload), "hit");
+  assert.deepStrictEqual(extractCdxSnapshot(payload), { timestamp: "19961017235908", original: "http://www2.yahoo.com:80/" });
+});
+check("empty CDX array is no-snapshot", () => {
+  assert.strictEqual(classifyCdxPayload([]), "no-snapshot");
+  assert.strictEqual(extractCdxSnapshot([]), null);
+});
+check("header-only CDX is no-snapshot", () => {
+  assert.strictEqual(classifyCdxPayload([["timestamp", "original"]]), "no-snapshot");
+});
+check("malformed CDX is api-error", () => {
+  assert.strictEqual(classifyCdxPayload({ bad: true }), "api-error");
+  assert.strictEqual(classifyCdxPayload([["timestamp", "original"], ["not-a-ts", 123]]), "api-error");
 });
 
 await Promise.all(pending);

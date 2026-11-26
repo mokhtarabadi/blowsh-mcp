@@ -216,9 +216,12 @@ export interface WaybackOutcome {
  * snapshot download itself still happens in fetchWaybackSnapshot.
  */
 export function classifyWaybackAvailability(data: unknown): WaybackOutcomeKind {
-  const closest = (data as { archived_snapshots?: { closest?: { available: boolean; url: string } } })?.archived_snapshots?.closest;
-  if (!closest?.available || !closest.url) return "no-snapshot";
-  if (!closest.url.includes("web.archive.org")) return "no-snapshot";
+  const payload = (data as { archived_snapshots?: { closest?: { available: boolean; url: string } }; error?: unknown }) ?? {};
+  if (payload.error !== undefined && payload.error !== null) {
+    if (typeof payload.error === "object" || typeof payload.error === "string") return "api-error";
+  }
+  const closest = payload.archived_snapshots?.closest;
+  if (!closest?.available || typeof closest.url !== "string" || !closest.url.includes("web.archive.org")) return "no-snapshot";
   return "hit";
 }
 
@@ -232,47 +235,132 @@ export function classifySnapshotBody(htmlLength: number): WaybackOutcomeKind {
   return htmlLength >= 200 ? "hit" : "snapshot-fetch-failed";
 }
 
+/**
+ * Classify a Wayback CDX JSON payload without performing network I/O.
+ *
+ * A normal response contains a header row followed by at most one data row.
+ * An empty response is a genuine miss, while a malformed payload is an API
+ * failure that may be retried or surfaced as `api-error`.
+ */
+export function classifyCdxPayload(data: unknown): WaybackOutcomeKind {
+  if (!Array.isArray(data)) return "api-error";
+  if (data.length < 2) return "no-snapshot";
+  const row: unknown = (data as unknown[])[1];
+  if (!Array.isArray(row) || row.length < 2) return "api-error";
+  const timestamp = (row as unknown[])[0];
+  const original = (row as unknown[])[1];
+  if (typeof timestamp !== "string" || typeof original !== "string") return "api-error";
+  if (!/^\d{14}$/.test(timestamp)) return "api-error";
+  if (!original.startsWith("http://") && !original.startsWith("https://")) return "api-error";
+  return "hit";
+}
+
+/** Extract the timestamp and original URL from a valid CDX payload. */
+export function extractCdxSnapshot(data: unknown): { timestamp: string; original: string } | null {
+  if (classifyCdxPayload(data) !== "hit") return null;
+  const row = (data as unknown[][])[1] as [string, string];
+  return { timestamp: row[0], original: row[1] };
+}
+
+/** Download one archive snapshot and preserve the existing body-size gate. */
+async function fetchSnapshotByUrl(snapshotUrl: string, timestamp: string): Promise<WaybackSnapshot | null> {
+  try {
+    await assertSafeUrl(snapshotUrl);
+    const snapRes = await axios.get(snapshotUrl, {
+      timeout: 15000,
+      maxRedirects: 5,
+      responseType: "text",
+      maxContentLength: 5 * 1024 * 1024,
+      headers: { "User-Agent": "blowsh-mcp/2.3.2" },
+    });
+    const html = String(snapRes.data);
+    if (classifySnapshotBody(html.length) !== "hit") {
+      console.error(`[fetchWeb] Wayback: snapshot body too small for ${snapshotUrl}`);
+      return null;
+    }
+    return { html, timestamp, url: snapshotUrl };
+  } catch (e) {
+    console.error(`[fetchWeb] Wayback: snapshot fetch failed for ${snapshotUrl}: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+/** Query CDX for one successful snapshot and download its raw archived body. */
+async function fetchCdxSnapshot(originalUrl: string): Promise<{ kind: WaybackOutcomeKind; snapshot?: WaybackSnapshot }> {
+  const cdx = `https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(originalUrl)}&output=json&limit=1&filter=statuscode:200&fl=timestamp,original`;
+  await assertSafeUrl(cdx);
+  const res = await axios.get(cdx, { timeout: 8000, maxRedirects: 3, responseType: "json" });
+  const kind = classifyCdxPayload(res.data);
+  if (kind !== "hit") return { kind };
+  const parsed = extractCdxSnapshot(res.data);
+  if (!parsed) return { kind: "api-error" };
+  const snapshotUrl = `https://web.archive.org/web/${parsed.timestamp}id_/${parsed.original}`;
+  const snapshot = await fetchSnapshotByUrl(snapshotUrl, parsed.timestamp);
+  if (!snapshot) return { kind: "snapshot-fetch-failed" };
+  return { kind: "hit", snapshot };
+}
+
 async function fetchWaybackSnapshot(originalUrl: string): Promise<WaybackSnapshot | null> {
   const outcome = await fetchWaybackOutcome(originalUrl);
   return outcome.snapshot ?? null;
 }
 
 async function fetchWaybackOutcome(originalUrl: string): Promise<WaybackOutcome> {
-  try {
-    // SSRF check for the Wayback API host (public, safe)
-    await assertSafeUrl("https://web.archive.org/");
-    const api = `https://archive.org/wayback/available?url=${encodeURIComponent(originalUrl)}`;
+  const api = `https://archive.org/wayback/available?url=${encodeURIComponent(originalUrl)}`;
+  const fetchAvailability = async (): Promise<{ kind: WaybackOutcomeKind; url?: string; timestamp?: string }> => {
+    await assertSafeUrl(api);
     const res = await axios.get(api, { timeout: 7000, maxRedirects: 3 });
-    const availability = classifyWaybackAvailability(res.data);
-    if (availability !== "hit") {
-      console.error(`[fetchWeb] Wayback: no snapshot available for ${originalUrl}`);
+    const kind = classifyWaybackAvailability(res.data);
+    if (kind !== "hit") return { kind };
+    const closest = (res.data as { archived_snapshots: { closest: { url: string; timestamp: string } } }).archived_snapshots.closest;
+    return { kind, url: closest.url, timestamp: closest.timestamp };
+  };
+
+  let first: { kind: WaybackOutcomeKind; url?: string; timestamp?: string };
+  try {
+    first = await fetchAvailability();
+  } catch (e) {
+    console.error(`[fetchWeb] Wayback: availability api-error for ${originalUrl}: ${e instanceof Error ? e.message : String(e)}`);
+    first = { kind: "api-error" };
+  }
+
+  if (first.kind === "hit" && first.url) {
+    const snap = await fetchSnapshotByUrl(first.url, first.timestamp ?? "");
+    if (snap) return { kind: "hit", snapshot: snap };
+    return { kind: "snapshot-fetch-failed" };
+  }
+  if (first.kind === "no-snapshot") {
+    console.error(`[fetchWeb] Wayback: no snapshot available for ${originalUrl}`);
+    return { kind: "no-snapshot" };
+  }
+
+  console.error(`[fetchWeb] Wayback: availability api-error for ${originalUrl}, retrying once`);
+  let second: { kind: WaybackOutcomeKind; url?: string; timestamp?: string };
+  try {
+    second = await fetchAvailability();
+  } catch (e) {
+    console.error(`[fetchWeb] Wayback: api-error retry transport failed for ${originalUrl}: ${e instanceof Error ? e.message : String(e)}`);
+    second = { kind: "api-error" };
+  }
+
+  if (second.kind === "hit" && second.url) {
+    const snap = await fetchSnapshotByUrl(second.url, second.timestamp ?? "");
+    if (snap) return { kind: "hit", snapshot: snap };
+    return { kind: "snapshot-fetch-failed" };
+  }
+
+  try {
+    const cdx = await fetchCdxSnapshot(originalUrl);
+    if (cdx.kind === "hit" && cdx.snapshot) return { kind: "hit", snapshot: cdx.snapshot };
+    if (cdx.kind === "no-snapshot") {
+      console.error(`[fetchWeb] Wayback: no snapshot available for ${originalUrl} via CDX`);
       return { kind: "no-snapshot" };
     }
-    const closest = (res.data as { archived_snapshots: { closest: { url: string; timestamp: string } } }).archived_snapshots.closest;
-    // Fetch the snapshot in a nested boundary: axios rejects non-2xx by
-    // default, so transport/HTTP failures here must map to
-    // "snapshot-fetch-failed", not the outer "api-error" (availability API).
-    const snapshotUrl: string = closest.url;
-    try {
-      const snapRes = await axios.get(snapshotUrl, {
-        timeout: 15000,
-        maxRedirects: 5,
-        responseType: "text",
-        maxContentLength: 5 * 1024 * 1024,
-        headers: { "User-Agent": "blowsh-mcp/2.3.2" },
-      });
-      const html = String(snapRes.data);
-      if (classifySnapshotBody(html.length) !== "hit") {
-        console.error(`[fetchWeb] Wayback: snapshot body too small for ${originalUrl}`);
-        return { kind: "snapshot-fetch-failed" };
-      }
-      return { kind: "hit", snapshot: { html, timestamp: closest.timestamp, url: snapshotUrl } };
-    } catch (e) {
-      console.error(`[fetchWeb] Wayback: snapshot fetch failed for ${originalUrl}: ${e instanceof Error ? e.message : String(e)}`);
-      return { kind: "snapshot-fetch-failed" };
-    }
+    if (cdx.kind === "snapshot-fetch-failed") return { kind: "snapshot-fetch-failed" };
+    console.error(`[fetchWeb] Wayback: CDX api-error for ${originalUrl}`);
+    return { kind: "api-error" };
   } catch (e) {
-    console.error(`[fetchWeb] Wayback: api-error for ${originalUrl}: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`[fetchWeb] Wayback: CDX api-error for ${originalUrl}: ${e instanceof Error ? e.message : String(e)}`);
     return { kind: "api-error" };
   }
 }
@@ -285,6 +373,8 @@ export function isHardFailure(e: unknown): boolean {
     if (msg.includes("404") || msg.includes("403") || msg.includes("paywall") || msg.includes("blocked") || msg.includes("failed with status")) return true;
     // network-ish failures are also hard: let archive try
     if (msg.includes("could not resolve") || msg.includes("timeout") || msg.includes("request failed")) return true;
+    // Empty extraction is a failed live render, so archive auto may rescue it.
+    if (e.code === EMPTY_EXTRACTION_CODE || msg.includes("empty extraction")) return true;
   }
   if (axios.isAxiosError(e) && e.response?.status !== undefined && e.response.status >= 400) return true;
   return false;
